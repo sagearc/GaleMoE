@@ -1,93 +1,110 @@
-from typing import Optional, List
-from huggingface_hub import get_safetensors_metadata, hf_hub_download
-from tqdm import tqdm
+import json
 from dataclasses import dataclass
-from abc import ABC, abstractmethod
-from functools import lru_cache
+from typing import Optional
 
-@lru_cache(maxsize=2)
-def fetch_hf_weight_map(model_id: str):
-    """
-    Fetches the JSON mapping (tensor_name -> filename).
-    Cached so we don't hit the API repeatedly for different layers.
-    """
-    metadata = get_safetensors_metadata(model_id)
-    return metadata.weight_map
+import humanize
+from huggingface_hub import (
+    get_hf_file_metadata,
+    hf_hub_download,
+    hf_hub_url,
+)
+from safetensors import safe_open
+from torch import Tensor
+
 
 @dataclass
 class TensorMetadata:
     model_id: str
     tensor_name: str
-    hf_filename: Optional[str] = None 
+    hf_filename: str
     local_path: Optional[str] = None
 
-class BaseMoE(ABC):
+    @property
+    def hf_url(self) -> str:
+        return hf_hub_url(repo_id=self.model_id, filename=self.hf_filename)
+
+    def size(self, human_readable: bool = False) -> int:
+        metadata = get_hf_file_metadata(self.hf_url)
+        if human_readable:
+            return humanize.naturalsize(metadata.size)
+        return metadata.size
+    
+    def download_file(self) -> None:
+        self.local_path = hf_hub_download(
+            repo_id=self.model_id,
+            filename=self.hf_filename
+        )
+        return self.local_path
+    
+    def load(self) -> Tensor:
+        if self.local_path is None:
+            raise ValueError("Tensor file not downloaded yet. Call `download_file()` first.")
+        
+        with safe_open(self.local_path, framework="pt") as f:
+            tensor = f.get_tensor(self.tensor_name)
+        
+        return tensor
+
+
+class BaseMoE:
     """Base class for Mixture of Experts models."""
     
     model_id: str
     n_experts: int
+    n_layers: int
 
-    @abstractmethod
-    def get_expert_tensor_names(self, layer: int) -> List[TensorMetadata]:
-        pass
+    expert_tensor_name_template: str
+    router_tensor_name_template: str
 
-    @abstractmethod
-    def get_router_tensor_name(self, layer: int) -> TensorMetadata:
-        pass
+    _weight_map: Optional[dict[str, str]] = None
 
-    def map_tensor_files(self, layer: int) -> List[TensorMetadata]:
-        expert_names = self.get_expert_tensor_names(layer)
-        router_name = self.get_router_tensor_name(layer)
-        target_tensors = [router_name] + expert_names
-        
-        remote_file_map = fetch_hf_weight_map(self.model_id)
 
-        for tensor in target_tensors:
-            if tensor.tensor_name in remote_file_map:
-                tensor.hf_filename = remote_file_map[tensor.tensor_name]
-            else:
-                raise ValueError(f"Tensor name {tensor.tensor_name} not found in remote file map.")
-        
-        return target_tensors
+    @property
+    def weight_map(self):
+        """Returns the mapping of tensor names to Hugging Face filenames."""
+        if self._weight_map is None:
+            local_index = hf_hub_download(
+                repo_id=self.model_id,
+                filename="model.safetensors.index.json"
+            )
 
-    def download_and_map_weights(self, layer: int):
-        """Downloads required files and populates local_path."""
-        tensor_list = self.map_tensor_files(layer)
-        
-        # Use a dict to avoid downloading the same file twice for different tensors
-        downloaded_files_map = {}
+            with open(local_index, "r") as f:
+                index = json.load(f)
 
-        pbar = tqdm(tensor_list, desc=f"Layer {layer} Weights")
-        for tensor in pbar:
-            pbar.set_postfix(file=tensor.hf_filename)
+            self._weight_map = index["weight_map"]
 
-            if tensor.hf_filename not in downloaded_files_map:
-                local_path = hf_hub_download(
-                    repo_id=self.model_id, 
-                    filename=tensor.hf_filename
+        return self._weight_map
+
+    def get_experts_metdata(self, layer: int) -> list[TensorMetadata]:
+        experts = []
+
+        for i in range(self.n_experts):
+            tensor_name = self.expert_tensor_name_template.format(layer=layer, expert=i)
+            hf_filename = self.weight_map[tensor_name]
+
+            experts.append(
+                TensorMetadata(
+                    model_id=self.model_id,
+                    tensor_name=tensor_name,
+                    hf_filename=hf_filename,
                 )
-                downloaded_files_map[tensor.hf_filename] = local_path
+            )
+        return experts
 
-            tensor.local_path = downloaded_files_map[tensor.hf_filename]     
+    def get_router_metadata(self, layer: int) -> TensorMetadata:
+        tensor_name = self.router_tensor_name_template.format(layer=layer)
+        hf_filename = self.weight_map[tensor_name]
 
-        return tensor_list
-
+        return TensorMetadata(
+            model_id=self.model_id,
+            tensor_name=tensor_name,
+            hf_filename=hf_filename,
+        )
 
 class Mixtral8x7B(BaseMoE):
     model_id = "mistralai/Mixtral-8x7B-v0.1"
     n_experts = 8
+    n_layers = 32
 
-    def get_expert_tensor_names(self, layer: int) -> List[TensorMetadata]:
-        return [
-            TensorMetadata(
-                model_id=self.model_id,
-                tensor_name=f"model.layers.{layer}.block_sparse_moe.experts.{i}.w1.weight",
-            )
-            for i in range(self.n_experts)
-        ]
-
-    def get_router_tensor_name(self, layer: int) -> TensorMetadata:
-        return TensorMetadata(
-            model_id=self.model_id,
-            tensor_name=f"model.layers.{layer}.block_sparse_moe.gate.weight",
-        )
+    expert_tensor_name_template = "model.layers.{layer}.block_sparse_moe.experts.{expert}.w1.weight"
+    router_tensor_name_template = "model.layers.{layer}.block_sparse_moe.gate.weight"
