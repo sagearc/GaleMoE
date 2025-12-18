@@ -1,0 +1,20 @@
+[project]
+name = "galemoe"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.12.0",
+    "ipykernel>=7.1.0",
+    "joblib>=1.5.3",
+    "matplotlib>=3.10.8",
+    "pandas>=2.3.3",
+    "polars>=1.36.1",
+    "ruff>=0.14.9",
+    "safetensors>=0.7.0",
+    "seaborn>=0.13.2",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+    "transformers>=4.57.3",
+]
