@@ -82,16 +82,45 @@ class MoEWeightsRepository:
 
         return loaded
 
-    def prefetch_layer(self, layer: int, max_workers: int = 4) -> None:
+    def prefetch_layer(self, layer: int, max_workers: int = 16) -> None:
         """
-        Prefetch (download) all files needed for a layer using snapshot_download.
-        snapshot_download is faster and more efficient for downloading multiple files.
+        Prefetch (download) all files needed for a layer using optimized snapshot_download.
+        
+        Uses optimizations for faster downloads:
+        - Higher max_workers for parallel downloads (default 16)
+        - Enables hf_transfer if available (via HF_HUB_ENABLE_HF_TRANSFER env var)
+        - Downloads automatically resume if interrupted (default behavior)
         
         Args:
             layer: Layer number to prefetch
-            max_workers: Maximum number of parallel download workers
+            max_workers: Maximum number of parallel download workers (default: 16 for speed)
         """
-        from huggingface_hub import hf_hub_download, snapshot_download
+        import os
+        from huggingface_hub import hf_hub_download
+        
+        # Enable hf_transfer for faster downloads (if available)
+        # This can provide 10-100x speedup for large files
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+        
+        # Additional optimizations for faster downloads
+        # Increase timeout for large files
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")  # 10 minutes
+        
+        # Check if hf-transfer is actually available and print status
+        hf_transfer_available = False
+        hf_transfer_version = None
+        try:
+            import hf_transfer  # type: ignore[import-untyped]
+            hf_transfer_available = True
+            hf_transfer_version = getattr(hf_transfer, "__version__", "unknown")
+        except ImportError:
+            pass
+        
+        if hf_transfer_available:
+            print(f"✓ Using hf-transfer for fast downloads (version: {hf_transfer_version})")
+        else:
+            print("⚠️  hf-transfer not installed. Install with: pip install hf-transfer")
+            print("   Downloads will be slower without it.")
         
         router_meta = self.moe.get_router_metadata(layer)
         expert_metas = self.moe.get_experts_metadata(layer)
@@ -124,16 +153,45 @@ class MoEWeightsRepository:
             print("✓ All files already cached")
             return
         
-        # Use snapshot_download for faster parallel downloads
-        print(f"Downloading {len(needed_files)} file(s) using snapshot_download (faster)...")
+        # Use parallel hf_hub_download instead of snapshot_download for better parallelism
+        # snapshot_download with allow_patterns doesn't parallelize as well
+        print(f"Downloading {len(needed_files)} file(s) in parallel...")
+        print(f"  Using {max_workers} parallel workers (hf_transfer enabled if available)")
+        
         try:
-            snapshot_dir = snapshot_download(
-                repo_id=self.moe.model_id,
-                allow_patterns=needed_files,  # Only download needed files
-                local_files_only=False,
-                max_workers=max_workers,  # Parallel downloads for speed
-            )
-            print(f"✓ Successfully downloaded files to: {snapshot_dir}")
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            def download_file(filename: str) -> tuple[str, str]:
+                """Download a single file and return (filename, path)."""
+                path = hf_hub_download(
+                    repo_id=self.moe.model_id,
+                    filename=filename,
+                    local_files_only=False,
+                )
+                return (filename, path)
+            
+            # Download files in parallel
+            downloaded = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all download tasks
+                future_to_file = {
+                    executor.submit(download_file, filename): filename 
+                    for filename in needed_files
+                }
+                
+                # Process completed downloads
+                for future in as_completed(future_to_file):
+                    filename = future_to_file[future]
+                    try:
+                        file_path = future.result()[1]
+                        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                        downloaded[filename] = file_path
+                        print(f"✓ Downloaded: {filename} ({file_size_mb:.1f} MB)")
+                    except Exception as e:
+                        print(f"✗ Failed to download {filename}: {e}")
+                        raise
+            
+            print(f"✓ Successfully downloaded {len(downloaded)} file(s)")
         except Exception as e:
             print(f"✗ Failed to download files: {e}")
             raise

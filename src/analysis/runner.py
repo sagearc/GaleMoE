@@ -26,8 +26,8 @@ class AlignmentRunner:
 
     def run_layer(self, layer: int) -> List[AlignmentResult]:
         """Run analysis on a single layer."""
-        # Prefetch files for the specified layer
-        self.repo.prefetch_layer(layer=layer, max_workers=1)
+        # Prefetch files for the specified layer (uses default max_workers=16 for fast downloads)
+        self.repo.prefetch_layer(layer=layer)
 
         layer_w = self.repo.load_layer(layer)
         return self.analyzer.analyze_layer(layer_w)

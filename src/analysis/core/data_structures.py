@@ -28,4 +28,5 @@ class AlignmentResult:
     shuffle_std: float
     delta_vs_shuffle: float
     z_vs_shuffle: float
+    cos_squared: float = 0.0  # cos^2(theta) for k=1, 0.0 otherwise
 

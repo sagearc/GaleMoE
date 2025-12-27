@@ -63,6 +63,28 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         return float((proj * proj).sum().clamp(0.0, 1.0).item())
     
     @staticmethod
+    def _align_cos_squared(router_vec: Tensor, V: Tensor) -> float:
+        """
+        Squared cosine of angle between router vector and first singular vector.
+        This is a direct correlation-style measure: cos^2(theta) where theta
+        is the angle between router_vec and the top singular vector.
+        
+        For k=1, this is equivalent to the projection energy, but computed
+        more directly as the squared dot product.
+        
+        router_vec: [d_model] - should already be normalized and on CPU
+        V: [d_model, d_model] - precomputed right singular vectors from SVD
+        
+        Returns:
+            cos^2(theta) where theta is angle between router_vec and v1 (first singular vector)
+        """
+        v1 = V[:, 0]  # First (top) singular vector [d_model]
+        # Since router_vec is normalized, dot product = cos(theta)
+        cos_theta_tensor = router_vec @ v1  # [1] tensor
+        cos_squared_tensor = (cos_theta_tensor * cos_theta_tensor).clamp(0.0, 1.0)
+        return float(cos_squared_tensor.item())
+    
+    @staticmethod
     def _compute_svd(w_in: Tensor) -> Tensor:
         """
         Precompute SVD once for an expert weight matrix.
@@ -165,12 +187,14 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
     ) -> List[Dict[str, float]]:
         """Compute alignment scores (projection energy) for all expert-k combinations.
         
+        For k=1, also computes cos^2(theta) as a direct correlation measure.
+        
         Args:
             expert_Vs: Precomputed V matrices for each expert
             R: Pre-normalized router vectors [n_experts, d_model]
             
         Returns:
-            List of dictionaries containing alignment scores (expert, k, align)
+            List of dictionaries containing alignment scores (expert, k, align, cos_squared)
         """
         n_experts = len(expert_Vs)
         scores = []
@@ -180,11 +204,18 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
                 # Compute alignment score (projection energy)
                 align = self._align_proj_energy(R[i], expert_Vs[i], k)
                 
-                scores.append({
+                score_dict = {
                     "expert": i,
                     "k": int(k),
                     "align": align,
-                })
+                }
+                
+                # For k=1, also compute cos^2(theta) as correlation-style measure
+                if k == 1:
+                    cos_squared = self._align_cos_squared(R[i], expert_Vs[i])
+                    score_dict["cos_squared"] = cos_squared
+                
+                scores.append(score_dict)
         
         return scores
     
@@ -215,6 +246,7 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
             align = score["align"]
             k = score["k"]
             expert = score["expert"]
+            cos_squared = score.get("cos_squared", 0.0)  # Only set for k=1
             
             # Compute baseline expectations
             random_expect = float(k / d_model)
@@ -238,6 +270,7 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
                     shuffle_std=sd,
                     delta_vs_shuffle=delta,
                     z_vs_shuffle=z,
+                    cos_squared=cos_squared,
                 )
             )
         
