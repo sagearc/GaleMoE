@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 from safetensors import safe_open
 from torch import Tensor
 
-from src.svd.data_structures import LayerWeights
+from src.analysis.core.data_structures import LayerWeights
 
 
 class ShardCache:

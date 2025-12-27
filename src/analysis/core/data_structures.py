@@ -1,4 +1,4 @@
-"""Data structures for SVD alignment analysis."""
+"""Data structures for router-expert alignment analysis."""
 from dataclasses import dataclass
 from typing import List
 

@@ -1,4 +1,4 @@
-"""SVD cache for persisting decompositions across runs."""
+"""Cache for SVD decompositions used in router-expert analysis."""
 import pickle
 from pathlib import Path
 from typing import Dict, Optional, Tuple

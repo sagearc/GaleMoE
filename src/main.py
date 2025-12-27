@@ -1,8 +1,8 @@
-"""Main entry point for SVD decomposition analysis."""
-from src.model_loader import Mixtral8x7B
-from src.svd import (
+"""Main entry point for router-expert alignment analysis."""
+from src.models import Mixtral8x7B
+from src.analysis import (
     SVDAlignmentAnalyzer,
-    SVDMilestoneRunner,
+    AlignmentRunner,
     save_results,
 )
 
@@ -15,12 +15,10 @@ if __name__ == "__main__":
     # analyzer = SVDAlignmentAnalyzer(k_list=(8, 16, 32), n_shuffles=10, seed=0)
     analyzer = SVDAlignmentAnalyzer(k_list=(2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096), n_shuffles=200, seed=0)
 
-    runner = SVDMilestoneRunner(moe=moe, analyzer=analyzer)
-    
-    # Layer 11 uses shard 7 (which you have) and shard 8 (needs download)
-    # It does NOT use shard 6, so you can test without downloading shard 6
+    runner = AlignmentRunner(moe=moe, analyzer=analyzer)
+
     LAYER = 10
-    print(f"Running analysis on Layer {LAYER} (uses shard 7, not shard 6)")
+    print(f"Running analysis on Layer {LAYER}")
     results = runner.run_layer(layer=LAYER)
 
     # Save results with metadata
@@ -34,5 +32,5 @@ if __name__ == "__main__":
     print(df.groupby("k")[["align", "delta_vs_shuffle", "z_vs_shuffle", "effect_over_random"]].mean())
     
     print(f"\nTo compare with other runs, use:")
-    print(f"  from src.svd import compare_runs")
+    print(f"  from src.analysis import compare_runs")
     print(f"  compare_runs(['results/file1.json', 'results/file2.json', ...])")

@@ -1,13 +1,13 @@
-"""Runner that coordinates repository and analyzer."""
+"""Runner that coordinates repository and analyzer for router-expert alignment analysis."""
 from typing import List, Optional, Sequence
 
-from src.svd.repository import MoEWeightsRepository
-from src.svd.svd_analyzer import SVDAlignmentAnalyzer
-from src.svd.data_structures import AlignmentResult
+from src.analysis.core.data_structures import AlignmentResult
+from src.analysis.methods.svd.analyzer import SVDAlignmentAnalyzer
+from src.analysis.storage.repository import MoEWeightsRepository
 
 
-class SVDMilestoneRunner:
-    """Coordinates weight loading and analysis."""
+class AlignmentRunner:
+    """Coordinates weight loading and analysis for router-expert alignment."""
     
     def __init__(
         self,

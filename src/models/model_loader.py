@@ -108,3 +108,4 @@ class Mixtral8x7B(BaseMoE):
 
     expert_tensor_name_template = "model.layers.{layer}.block_sparse_moe.experts.{expert}.w1.weight"
     router_tensor_name_template = "model.layers.{layer}.block_sparse_moe.gate.weight"
+

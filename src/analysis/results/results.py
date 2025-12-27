@@ -7,8 +7,8 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 
-from src.svd.data_structures import AlignmentResult
-from src.svd.svd_analyzer import SVDAlignmentAnalyzer
+from src.analysis.core.data_structures import AlignmentResult
+from src.analysis.methods.svd.analyzer import SVDAlignmentAnalyzer
 
 
 class ResultsManager:

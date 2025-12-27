@@ -1,11 +1,11 @@
-"""SVD alignment analyzer for MoE models."""
+"""SVD-based alignment analyzer for router-expert analysis."""
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch import Generator, Tensor
 
-from src.svd.data_structures import AlignmentResult, LayerWeights
-from src.svd.svd_cache import SVDCache
+from src.analysis.core.data_structures import AlignmentResult, LayerWeights
+from src.analysis.storage.cache import SVDCache
 
 
 class SVDAlignmentAnalyzer:
