@@ -1,4 +1,5 @@
 """Router-expert alignment analysis for MoE models."""
+from src.analysis.core.analyzer import AlignmentAnalyzer
 from src.analysis.core.data_structures import AlignmentResult, LayerWeights
 from src.analysis.results.results import (
     ResultsManager,
@@ -12,6 +13,7 @@ from src.analysis.storage.repository import MoEWeightsRepository, ShardCache
 from src.analysis.storage.cache import SVDCache
 
 __all__ = [
+    "AlignmentAnalyzer",
     "AlignmentResult",
     "AlignmentRunner",
     "LayerWeights",

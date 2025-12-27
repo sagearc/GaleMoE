@@ -7,8 +7,8 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 
+from src.analysis.core.analyzer import AlignmentAnalyzer
 from src.analysis.core.data_structures import AlignmentResult
-from src.analysis.methods.svd.analyzer import SVDAlignmentAnalyzer
 
 
 class ResultsManager:
@@ -27,7 +27,7 @@ class ResultsManager:
     def save(
         self,
         results: List[AlignmentResult],
-        analyzer: SVDAlignmentAnalyzer,
+        analyzer: AlignmentAnalyzer,
         layer: int,
         model_id: str,
     ) -> str:
@@ -36,7 +36,7 @@ class ResultsManager:
         
         Args:
             results: List of AlignmentResult objects
-            analyzer: SVDAlignmentAnalyzer used for analysis
+            analyzer: AlignmentAnalyzer used for analysis (any method)
             layer: Layer number analyzed
             model_id: Model identifier
             
@@ -45,12 +45,22 @@ class ResultsManager:
         """
         # Create filename with metadata
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        method_name = analyzer.method_name
         k_str = "_".join(map(str, analyzer.k_list))
         
-        # Get seed from analyzer (stored during initialization)
-        seed = getattr(analyzer, 'seed', 'unknown')
+        # Get metadata from analyzer (handles optional fields gracefully)
+        metadata_dict = analyzer.get_metadata()
+        n_shuffles = metadata_dict.get("n_shuffles", "unknown")
+        seed = metadata_dict.get("seed", "unknown")
         
-        filename = f"layer{layer}_k{k_str}_shuffles{analyzer.n_shuffles}_seed{seed}_{timestamp}.json"
+        # Build filename with available metadata
+        filename_parts = [f"layer{layer}", method_name, f"k{k_str}"]
+        if n_shuffles != "unknown":
+            filename_parts.append(f"shuffles{n_shuffles}")
+        if seed != "unknown":
+            filename_parts.append(f"seed{seed}")
+        filename_parts.append(timestamp)
+        filename = "_".join(filename_parts) + ".json"
         filepath = self.output_dir / filename
         
         # Prepare data with metadata
@@ -58,12 +68,10 @@ class ResultsManager:
             "metadata": {
                 "model_id": model_id,
                 "layer": layer,
-                "k_list": list(analyzer.k_list),
-                "n_shuffles": analyzer.n_shuffles,
-                "seed": seed,
                 "timestamp": timestamp,
                 "datetime": datetime.now().isoformat(),
                 "n_experts": len(set(r.expert for r in results)),
+                **metadata_dict,  # Include all method-specific metadata
             },
             "results": [asdict(r) for r in results]
         }
@@ -118,7 +126,12 @@ class ResultsManager:
             # Add metadata columns
             summary = df.groupby("k")[["align", "delta_vs_shuffle", "z_vs_shuffle", "effect_over_random"]].mean()
             summary = summary.reset_index()
-            summary["run"] = f"L{metadata['layer']}_k{metadata['k_list']}_s{metadata['n_shuffles']}"
+            
+            # Build run identifier with available metadata
+            run_parts = [f"L{metadata['layer']}", f"k{metadata['k_list']}"]
+            if "n_shuffles" in metadata:
+                run_parts.append(f"s{metadata['n_shuffles']}")
+            summary["run"] = "_".join(run_parts)
             summary["timestamp"] = metadata["timestamp"]
             
             all_data.append(summary)
@@ -149,7 +162,7 @@ class ResultsManager:
 # Backward compatibility functions
 def save_results(
     results: List[AlignmentResult],
-    analyzer: SVDAlignmentAnalyzer,
+    analyzer: AlignmentAnalyzer,
     layer: int,
     model_id: str,
     output_dir: str = "results"

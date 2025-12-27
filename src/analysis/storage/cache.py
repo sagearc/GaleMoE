@@ -26,8 +26,16 @@ class SVDCache:
         return self.cache_dir / filename
     
     def get(self, model_id: str, layer: int, expert: int, w_in: Tensor) -> Optional[Tensor]:
-        """
-        Get cached V matrix, or None if not cached.
+        """Get cached V matrix, or None if not cached.
+        
+        Args:
+            model_id: Model identifier
+            layer: Layer number
+            expert: Expert index
+            w_in: Expert weight matrix (used for cache key, not validated)
+            
+        Returns:
+            Cached V matrix if available, None otherwise
         """
         key = self._get_cache_key(model_id, layer, expert)
         
@@ -50,8 +58,13 @@ class SVDCache:
         return None
     
     def put(self, model_id: str, layer: int, expert: int, V: Tensor) -> None:
-        """
-        Cache V matrix to both memory and disk.
+        """Cache V matrix to both memory and disk.
+        
+        Args:
+            model_id: Model identifier
+            layer: Layer number
+            expert: Expert index
+            V: V matrix (right singular vectors) to cache
         """
         key = self._get_cache_key(model_id, layer, expert)
         

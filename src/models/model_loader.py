@@ -23,13 +23,26 @@ class TensorMetadata:
     def hf_url(self) -> str:
         return hf_hub_url(repo_id=self.model_id, filename=self.hf_filename)
 
-    def size(self, human_readable: bool = False) -> int:
+    def size(self, human_readable: bool = False) -> int | str:
+        """Get the size of the tensor file.
+        
+        Args:
+            human_readable: If True, return human-readable string (e.g., "1.5 MB")
+            
+        Returns:
+            File size in bytes (int) or human-readable string (str)
+        """
         metadata = get_hf_file_metadata(self.hf_url)
         if human_readable:
             return humanize.naturalsize(metadata.size)
         return metadata.size
     
-    def download_file(self) -> None:
+    def download_file(self) -> str:
+        """Download the file from Hugging Face Hub.
+        
+        Returns:
+            Local path to the downloaded file
+        """
         self.local_path = hf_hub_download(
             repo_id=self.model_id,
             filename=self.hf_filename
@@ -37,6 +50,14 @@ class TensorMetadata:
         return self.local_path
     
     def load(self) -> Tensor:
+        """Load the tensor from the local file.
+        
+        Returns:
+            PyTorch tensor
+            
+        Raises:
+            ValueError: If file has not been downloaded yet
+        """
         if self.local_path is None:
             raise ValueError("Tensor file not downloaded yet. Call `download_file()` first.")
         
@@ -47,21 +68,31 @@ class TensorMetadata:
 
 
 class BaseMoE:
-    """Base class for Mixture of Experts models."""
+    """Base class for Mixture of Experts models.
+    
+    Subclasses should define:
+    - model_id: Hugging Face model identifier
+    - n_experts: Number of experts in the MoE layer
+    - n_layers: Total number of layers in the model
+    - expert_tensor_name_template: Format string for expert tensor names
+    - router_tensor_name_template: Format string for router tensor names
+    """
     
     model_id: str
     n_experts: int
     n_layers: int
-
     expert_tensor_name_template: str
     router_tensor_name_template: str
-
     _weight_map: Optional[dict[str, str]] = None
 
 
     @property
-    def weight_map(self):
-        """Returns the mapping of tensor names to Hugging Face filenames."""
+    def weight_map(self) -> dict[str, str]:
+        """Returns the mapping of tensor names to Hugging Face filenames.
+        
+        Returns:
+            Dictionary mapping tensor names to their shard filenames
+        """
         if self._weight_map is None:
             local_index = hf_hub_download(
                 repo_id=self.model_id,
@@ -75,7 +106,15 @@ class BaseMoE:
 
         return self._weight_map
 
-    def get_experts_metdata(self, layer: int) -> list[TensorMetadata]:
+    def get_experts_metadata(self, layer: int) -> list[TensorMetadata]:
+        """Get metadata for all expert weight tensors in a layer.
+        
+        Args:
+            layer: Layer number
+            
+        Returns:
+            List of TensorMetadata objects for all experts
+        """
         experts = []
 
         for i in range(self.n_experts):
@@ -92,6 +131,14 @@ class BaseMoE:
         return experts
 
     def get_router_metadata(self, layer: int) -> TensorMetadata:
+        """Get metadata for the router (gate) weight tensor in a layer.
+        
+        Args:
+            layer: Layer number
+            
+        Returns:
+            TensorMetadata object for the router tensor
+        """
         tensor_name = self.router_tensor_name_template.format(layer=layer)
         hf_filename = self.weight_map[tensor_name]
 

@@ -1,9 +1,13 @@
 """Runner that coordinates repository and analyzer for router-expert alignment analysis."""
+from __future__ import annotations
+
 from typing import List, Optional, Sequence
 
+from src.analysis.core.analyzer import AlignmentAnalyzer
 from src.analysis.core.data_structures import AlignmentResult
 from src.analysis.methods.svd.analyzer import SVDAlignmentAnalyzer
 from src.analysis.storage.repository import MoEWeightsRepository
+from src.models.model_loader import BaseMoE
 
 
 class AlignmentRunner:
@@ -11,13 +15,14 @@ class AlignmentRunner:
     
     def __init__(
         self,
-        moe,
+        moe: BaseMoE,
         repo: Optional[MoEWeightsRepository] = None,
-        analyzer: Optional[SVDAlignmentAnalyzer] = None
+        analyzer: Optional[AlignmentAnalyzer] = None
     ):
         self.moe = moe
         self.repo = repo or MoEWeightsRepository(moe)
-        self.analyzer = analyzer or SVDAlignmentAnalyzer()
+        # Default to SVD if no analyzer provided
+        self.analyzer: AlignmentAnalyzer = analyzer or SVDAlignmentAnalyzer()
 
     def run_layer(self, layer: int) -> List[AlignmentResult]:
         """Run analysis on a single layer."""

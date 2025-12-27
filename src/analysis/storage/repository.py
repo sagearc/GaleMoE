@@ -1,4 +1,6 @@
 """Repository for loading MoE weights from Hugging Face."""
+from __future__ import annotations
+
 import os
 from collections import defaultdict
 from typing import Dict, List, Optional
@@ -7,21 +9,30 @@ from safetensors import safe_open
 from torch import Tensor
 
 from src.analysis.core.data_structures import LayerWeights
+from src.models.model_loader import BaseMoE, TensorMetadata
 
 
 class ShardCache:
-    """
-    In-memory cache to avoid repeated calls to download_file() for the same file.
+    """In-memory cache to avoid repeated calls to download_file() for the same file.
+    
     download_file() already checks Hugging Face cache, but this avoids repeated
     cache lookups within the same Python session.
     """
-    def __init__(self):
+    
+    def __init__(self) -> None:
+        """Initialize an empty shard cache."""
         self._local_paths: Dict[tuple[str, str], str] = {}
 
-    def ensure_downloaded(self, meta) -> str:
-        """
-        Ensure file is downloaded. Uses in-memory cache to avoid repeated calls.
+    def ensure_downloaded(self, meta: TensorMetadata) -> str:
+        """Ensure file is downloaded. Uses in-memory cache to avoid repeated calls.
+        
         download_file() handles Hugging Face cache checking automatically.
+        
+        Args:
+            meta: TensorMetadata object for the file to download
+            
+        Returns:
+            Local path to the downloaded file
         """
         key = (meta.model_id, meta.hf_filename)
         if key not in self._local_paths:
@@ -35,14 +46,24 @@ class ShardCache:
 class MoEWeightsRepository:
     """Repository for loading MoE weights from Hugging Face Hub."""
     
-    def __init__(self, moe, cache: Optional[ShardCache] = None):
+    def __init__(self, moe: BaseMoE, cache: Optional[ShardCache] = None) -> None:
+        """Initialize the repository.
+        
+        Args:
+            moe: BaseMoE model instance
+            cache: Optional ShardCache instance (creates new one if not provided)
+        """
         self.moe = moe
         self.cache = cache or ShardCache()
 
-    def _load_many(self, metas: List) -> Dict[str, Tensor]:
-        """
-        Load a bunch of tensors that may live across multiple shards.
-        Returns: {tensor_name: tensor}
+    def _load_many(self, metas: List[TensorMetadata]) -> Dict[str, Tensor]:
+        """Load multiple tensors that may live across multiple shard files.
+        
+        Args:
+            metas: List of TensorMetadata objects to load
+            
+        Returns:
+            Dictionary mapping tensor names to loaded tensors
         """
         by_file = defaultdict(list)
         for m in metas:
@@ -61,15 +82,19 @@ class MoEWeightsRepository:
 
         return loaded
 
-    def prefetch_layer(self, layer: int, max_workers: int = 4, max_retries: int = 3) -> None:
+    def prefetch_layer(self, layer: int, max_workers: int = 4) -> None:
         """
         Prefetch (download) all files needed for a layer using snapshot_download.
         snapshot_download is faster and more efficient for downloading multiple files.
+        
+        Args:
+            layer: Layer number to prefetch
+            max_workers: Maximum number of parallel download workers
         """
         from huggingface_hub import hf_hub_download, snapshot_download
         
         router_meta = self.moe.get_router_metadata(layer)
-        expert_metas = self.moe.get_experts_metdata(layer)
+        expert_metas = self.moe.get_experts_metadata(layer)
 
         # Get unique shard filenames needed for THIS layer
         all_metas = [router_meta] + expert_metas
@@ -90,7 +115,8 @@ class MoEWeightsRepository:
                     file_size_mb = os.path.getsize(cached_path) / (1024 * 1024)
                     print(f"✓ Already cached: {shard_filename} ({file_size_mb:.1f} MB)")
                     continue
-            except Exception:
+            except Exception:  # noqa: BLE001 - Expected to catch all exceptions here
+                # File not in cache, will download below
                 pass
             needed_files.append(shard_filename)
         
@@ -113,9 +139,19 @@ class MoEWeightsRepository:
             raise
 
     def load_layer(self, layer: int) -> LayerWeights:
-        """Load weights for a specific layer."""
+        """Load weights for a specific layer.
+        
+        Args:
+            layer: Layer number to load
+            
+        Returns:
+            LayerWeights object containing router and expert weights
+            
+        Raises:
+            ValueError: If weight shapes don't match expected dimensions
+        """
         router_meta = self.moe.get_router_metadata(layer)
-        expert_metas = self.moe.get_experts_metdata(layer)
+        expert_metas = self.moe.get_experts_metadata(layer)
         metas = [router_meta] + expert_metas
 
         loaded = self._load_many(metas)
@@ -123,13 +159,19 @@ class MoEWeightsRepository:
         gate_w = loaded[router_meta.tensor_name]
         experts_w_in = [loaded[m.tensor_name] for m in expert_metas]
 
-        # basic sanity checks
+        # Validate weight shapes
         if gate_w.ndim != 2 or gate_w.shape[0] != self.moe.n_experts:
-            raise ValueError(f"Unexpected gate weight shape {tuple(gate_w.shape)} (expected [n_experts, d_model])")
+            raise ValueError(
+                f"Unexpected gate weight shape {tuple(gate_w.shape)} "
+                f"(expected [n_experts={self.moe.n_experts}, d_model])"
+            )
         d_model = gate_w.shape[1]
         for i, w in enumerate(experts_w_in):
             if w.ndim != 2 or w.shape[1] != d_model:
-                raise ValueError(f"Expert {i} unexpected shape {tuple(w.shape)} (expected [d_ff, d_model])")
+                raise ValueError(
+                    f"Expert {i} unexpected shape {tuple(w.shape)} "
+                    f"(expected [d_ff, d_model={d_model}])"
+                )
 
         return LayerWeights(
             model_id=self.moe.model_id,
