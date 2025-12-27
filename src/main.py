@@ -19,7 +19,7 @@ if __name__ == "__main__":
     runner = AlignmentRunner(moe=moe, analyzer=analyzer)
 
     # Run analysis
-    LAYER = 15
+    LAYER = 5
     print(f"Running analysis on Layer {LAYER}")
     results = runner.run_layer(layer=LAYER)
 
