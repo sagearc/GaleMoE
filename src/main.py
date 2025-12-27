@@ -14,7 +14,7 @@ if __name__ == "__main__":
     analyzer = SVDAlignmentAnalyzer(
         k_list=(2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096),
         n_shuffles=200,
-        seed=0,
+        seed=42,
     )
     runner = AlignmentRunner(moe=moe, analyzer=analyzer)
 

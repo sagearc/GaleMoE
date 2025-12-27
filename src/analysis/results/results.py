@@ -1,5 +1,6 @@
 """Object-oriented utilities for saving, loading, and comparing analysis results."""
 import json
+import subprocess
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -11,17 +12,59 @@ from src.analysis.core.analyzer import AlignmentAnalyzer
 from src.analysis.core.data_structures import AlignmentResult
 
 
-class ResultsManager:
-    """Manages saving, loading, and comparing analysis results."""
+def _get_project_root() -> Path:
+    """Get the project root directory using git.
     
-    def __init__(self, output_dir: str = "results"):
+    Uses 'git rev-parse --show-toplevel' to find the git repository root,
+    which should be the project root (GaleMoE/).
+    
+    Falls back to going up from current file if git is not available.
+    """
+    try:
+        # Try to get git root
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).parent,
+        )
+        git_root = Path(result.stdout.strip())
+        return git_root
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Fallback: assume this file is in src/analysis/results/, go up 3 levels
+        current_file = Path(__file__).resolve()
+        project_root = current_file.parent.parent.parent.parent
+        return project_root
+
+
+class ResultsManager:
+    """Manages saving, loading, and comparing analysis results.
+    
+    Results directory is always created relative to the project root (GaleMoE/),
+    regardless of where the script is run from.
+    """
+    
+    def __init__(self, output_dir: Optional[str] = None):
         """
         Initialize ResultsManager.
         
         Args:
-            output_dir: Directory to save/load results from
+            output_dir: Optional output directory path. If None, uses 'results' 
+                      relative to project root (GaleMoE/). If relative path provided,
+                      it's relative to project root. If absolute path provided, uses as-is.
         """
-        self.output_dir = Path(output_dir)
+        if output_dir is None:
+            project_root = _get_project_root()
+            self.output_dir = project_root / "results"
+        else:
+            output_path = Path(output_dir)
+            if output_path.is_absolute():
+                self.output_dir = output_path
+            else:
+                project_root = _get_project_root()
+                self.output_dir = project_root / output_dir
+        
         self.output_dir.mkdir(exist_ok=True)
     
     def save(
@@ -46,7 +89,6 @@ class ResultsManager:
         # Create filename with metadata
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         method_name = analyzer.method_name
-        k_str = "_".join(map(str, analyzer.k_list))
         
         # Get metadata from analyzer (handles optional fields gracefully)
         metadata_dict = analyzer.get_metadata()
@@ -54,11 +96,29 @@ class ResultsManager:
         seed = metadata_dict.get("seed", "unknown")
         
         # Build filename with available metadata
-        filename_parts = [f"layer{layer}", method_name, f"k{k_str}"]
+        # Format: layer{layer}_{method}_k{min}-{max}_shuffles{n}_seed{s}_{timestamp}
+        filename_parts = [f"layer{layer}", method_name]
+        
+        # Add k_list info (compact format for long lists)
+        k_list = list(analyzer.k_list)
+        if len(k_list) <= 5:
+            k_str = "_".join(map(str, k_list))
+            filename_parts.append(f"k{k_str}")
+        else:
+            # For long k lists, use range format
+            k_str = f"k{k_list[0]}-{k_list[-1]}-{len(k_list)}"
+            filename_parts.append(k_str)
+        
+        # Always include n_shuffles if available (critical parameter)
         if n_shuffles != "unknown":
             filename_parts.append(f"shuffles{n_shuffles}")
+        else:
+            filename_parts.append("shuffles-unknown")
+        
+        # Always include seed if available
         if seed != "unknown":
             filename_parts.append(f"seed{seed}")
+        
         filename_parts.append(timestamp)
         filename = "_".join(filename_parts) + ".json"
         filepath = self.output_dir / filename

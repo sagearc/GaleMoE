@@ -1,4 +1,5 @@
 """Cache for SVD decompositions used in router-expert analysis."""
+import subprocess
 import pickle
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -6,13 +7,59 @@ from typing import Dict, Optional, Tuple
 from torch import Tensor
 
 
+def _get_project_root() -> Path:
+    """Get the project root directory using git.
+    
+    Uses 'git rev-parse --show-toplevel' to find the git repository root,
+    which should be the project root (GaleMoE/).
+    
+    Falls back to going up from current file if git is not available.
+    """
+    try:
+        # Try to get git root
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).parent,
+        )
+        git_root = Path(result.stdout.strip())
+        return git_root
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Fallback: assume this file is in src/analysis/storage/, go up 3 levels
+        current_file = Path(__file__).resolve()
+        project_root = current_file.parent.parent.parent.parent
+        return project_root
+
+
 class SVDCache:
     """
     Cache for SVD decompositions across the entire network.
     Persists to disk so it can be reused across runs.
+    
+    Cache directory is always created relative to the project root (GaleMoE/),
+    regardless of where the script is run from.
     """
-    def __init__(self, cache_dir: str = "svd_cache"):
-        self.cache_dir = Path(cache_dir)
+    def __init__(self, cache_dir: Optional[str] = None):
+        """Initialize SVD cache.
+        
+        Args:
+            cache_dir: Optional cache directory path. If None, uses 'svd_cache' 
+                      relative to project root (GaleMoE/). If relative path provided,
+                      it's relative to project root. If absolute path provided, uses as-is.
+        """
+        if cache_dir is None:
+            project_root = _get_project_root()
+            self.cache_dir = project_root / "svd_cache"
+        else:
+            cache_path = Path(cache_dir)
+            if cache_path.is_absolute():
+                self.cache_dir = cache_path
+            else:
+                project_root = _get_project_root()
+                self.cache_dir = project_root / cache_dir
+        
         self.cache_dir.mkdir(exist_ok=True)
         self._memory_cache: Dict[Tuple[str, int, int], Tensor] = {}
     
