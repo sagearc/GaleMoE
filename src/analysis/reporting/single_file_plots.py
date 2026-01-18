@@ -48,8 +48,15 @@ def generate_single_file_plots(
     plots = {}
     
     # Create comprehensive figure with all plots
-    fig = plt.figure(figsize=(20, 16))
-    gs = fig.add_gridspec(4, 3, hspace=0.4, wspace=0.3)
+    # Check if we have argmax metrics
+    has_argmax = 'argmax_accuracy' in df.columns and df['argmax_accuracy'].notna().any()
+    
+    if has_argmax:
+        fig = plt.figure(figsize=(20, 20))
+        gs = fig.add_gridspec(5, 3, hspace=0.4, wspace=0.3)
+    else:
+        fig = plt.figure(figsize=(20, 16))
+        gs = fig.add_gridspec(4, 3, hspace=0.4, wspace=0.3)
     fig.suptitle(f'Complete Analysis: Layer {metadata.get("layer", "?")} - {metadata.get("timestamp", "?")}', 
                  fontsize=16, fontweight='bold')
     
@@ -190,6 +197,46 @@ def generate_single_file_plots(
     ax12.grid(True, alpha=0.3, axis='y')
     ax12.axhline(y=0, color='r', linestyle='--', alpha=0.5)
     ax12.set_xticks(k_data["expert"])
+    
+    # Plot 13 & 14: Argmax accuracy and alignment margin (if available)
+    if has_argmax:
+        # Plot 13: Argmax accuracy vs k
+        ax13 = fig.add_subplot(gs[4, 0])
+        argmax_by_k = df.groupby("k")["argmax_accuracy"].mean()
+        ax13.plot(argmax_by_k.index, argmax_by_k.values, marker='o', linewidth=2, markersize=6, color='#E91E63')
+        ax13.set_xlabel('k', fontsize=11)
+        ax13.set_ylabel('Argmax Accuracy', fontsize=11)
+        ax13.set_title('Argmax Accuracy vs k', fontsize=12, fontweight='bold')
+        ax13.grid(True, alpha=0.3)
+        ax13.set_xscale('log', base=2)
+        ax13.set_ylim([0, 1.1])
+        ax13.axhline(y=1.0, color='g', linestyle='--', alpha=0.5, label='Perfect')
+        random_baseline = 1.0 / len(df['expert'].unique()) if len(df['expert'].unique()) > 0 else 0
+        ax13.axhline(y=random_baseline, color='r', linestyle='--', alpha=0.5, label=f'Random ({random_baseline:.3f})')
+        ax13.legend(fontsize=9)
+        
+        # Plot 14: Alignment margin vs k
+        ax14 = fig.add_subplot(gs[4, 1])
+        margin_by_k = df.groupby("k")["alignment_margin"].mean()
+        ax14.plot(margin_by_k.index, margin_by_k.values, marker='s', linewidth=2, markersize=6, color='#9C27B0')
+        ax14.set_xlabel('k', fontsize=11)
+        ax14.set_ylabel('Alignment Margin', fontsize=11)
+        ax14.set_title('Alignment Margin vs k', fontsize=12, fontweight='bold')
+        ax14.grid(True, alpha=0.3)
+        ax14.set_xscale('log', base=2)
+        ax14.axhline(y=0, color='r', linestyle='--', alpha=0.5)
+        
+        # Plot 15: Margin distribution histogram (at representative k)
+        ax15 = fig.add_subplot(gs[4, 2])
+        k_for_margin = k_for_expert  # Use same k as other expert plots
+        margin_data = df[df['k'] == k_for_margin]['alignment_margin']
+        if len(margin_data) > 0:
+            ax15.hist(margin_data, bins=20, color='#9C27B0', alpha=0.7, edgecolor='black')
+            ax15.set_xlabel('Alignment Margin', fontsize=11)
+            ax15.set_ylabel('Frequency', fontsize=11)
+            ax15.set_title(f'Margin Distribution (k={k_for_margin})', fontsize=12, fontweight='bold')
+            ax15.axvline(x=0, color='r', linestyle='--', alpha=0.5)
+            ax15.grid(True, alpha=0.3, axis='y')
     
     # Suppress tight_layout warnings - they're harmless when some axes are incompatible
     with warnings.catch_warnings():

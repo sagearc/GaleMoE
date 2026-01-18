@@ -184,24 +184,78 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         self,
         expert_Vs: List[Tensor],
         R: Tensor,
-    ) -> List[Dict[str, float]]:
+    ) -> Tuple[List[Dict[str, float]], Dict[int, Tuple[float, float]]]:
         """Compute alignment scores (projection energy) for all expert-k combinations.
         
         For k=1, also computes cos^2(theta) as a direct correlation measure.
+        Also computes argmax accuracy and alignment margin for each k.
         
         Args:
             expert_Vs: Precomputed V matrices for each expert
             R: Pre-normalized router vectors [n_experts, d_model]
             
         Returns:
-            List of dictionaries containing alignment scores (expert, k, align, cos_squared)
+            Tuple of:
+            - List of dictionaries containing alignment scores (expert, k, align, cos_squared)
+            - Dictionary mapping k -> (argmax_accuracy, alignment_margin)
         """
         n_experts = len(expert_Vs)
         scores = []
         
+        # Compute alignment matrix for all router-expert pairs for argmax metrics
+        # alignment_matrix[router_i, expert_j] = align(R[i], Expert_j)
+        argmax_metrics: Dict[int, Tuple[float, float]] = {}
+        
+        for k in self.k_list:
+            # Build alignment matrix: [n_experts, n_experts]
+            alignment_matrix = torch.zeros(n_experts, n_experts)
+            
+            for router_idx in range(n_experts):
+                for expert_idx in range(n_experts):
+                    align_val = self._align_proj_energy(R[router_idx], expert_Vs[expert_idx], k)
+                    alignment_matrix[router_idx, expert_idx] = align_val
+            
+            # Compute argmax accuracy and margin for this k
+            argmax_accuracies = []
+            alignment_margins = []
+            
+            for router_idx in range(n_experts):
+                # Get alignment scores for this router with all experts
+                router_alignments = alignment_matrix[router_idx, :]  # [n_experts]
+                
+                # Correct expert alignment
+                correct_align = router_alignments[router_idx].item()
+                
+                # Find maximum alignment (could be correct expert or another)
+                max_align = router_alignments.max().item()
+                max_expert_idx = router_alignments.argmax().item()
+                
+                # Argmax accuracy: 1.0 if correct expert has max, 0.0 otherwise
+                argmax_acc = 1.0 if max_expert_idx == router_idx else 0.0
+                argmax_accuracies.append(argmax_acc)
+                
+                # Alignment margin: correct - max(other experts)
+                # If correct expert is max, margin = correct - second_max
+                # Otherwise, margin = correct - max (negative)
+                if max_expert_idx == router_idx:
+                    # Correct expert is best, compute margin vs second-best
+                    other_alignments = router_alignments.clone()
+                    other_alignments[router_idx] = -float('inf')  # Exclude correct expert
+                    second_max = other_alignments.max().item()
+                    margin = correct_align - second_max
+                else:
+                    # Another expert is best, margin is negative
+                    margin = correct_align - max_align
+                alignment_margins.append(margin)
+            
+            mean_argmax_acc = float(torch.tensor(argmax_accuracies).mean().item())
+            mean_margin = float(torch.tensor(alignment_margins).mean().item())
+            argmax_metrics[k] = (mean_argmax_acc, mean_margin)
+        
+        # Now compute scores for correct router-expert pairs only
         for i in range(n_experts):
             for k in self.k_list:
-                # Compute alignment score (projection energy)
+                # Compute alignment score (projection energy) for correct pair
                 align = self._align_proj_energy(R[i], expert_Vs[i], k)
                 
                 score_dict = {
@@ -217,7 +271,7 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
                 
                 scores.append(score_dict)
         
-        return scores
+        return scores, argmax_metrics
     
     def _create_alignment_results(
         self,
@@ -225,6 +279,7 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         scores: List[Dict[str, float]],
         shuffle_stats: Dict[int, Tuple[float, float]],
         d_model: int,
+        argmax_metrics: Dict[int, Tuple[float, float]],
     ) -> List[AlignmentResult]:
         """Create AlignmentResult objects from alignment scores.
         
@@ -236,6 +291,7 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
             scores: List of score dictionaries from _compute_alignment_scores (expert, k, align)
             shuffle_stats: Shuffle statistics dict mapping k -> (mean, std)
             d_model: Model dimension
+            argmax_metrics: Dictionary mapping k -> (argmax_accuracy, alignment_margin)
             
         Returns:
             List of AlignmentResult objects with all computed statistics
@@ -247,6 +303,9 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
             k = score["k"]
             expert = score["expert"]
             cos_squared = score.get("cos_squared", 0.0)  # Only set for k=1
+            
+            # Get argmax metrics for this k
+            argmax_acc, margin = argmax_metrics[k]
             
             # Compute baseline expectations
             random_expect = float(k / d_model)
@@ -271,6 +330,8 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
                     delta_vs_shuffle=delta,
                     z_vs_shuffle=z,
                     cos_squared=cos_squared,
+                    argmax_accuracy=argmax_acc,
+                    alignment_margin=margin,
                 )
             )
         
@@ -299,14 +360,14 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         
         # Step 3: Compute shuffle statistics for null distribution
         shuffle_stats = self._shuffle_stats(layer_w, expert_Vs, R)
-        
-        # Step 4: Compute alignment scores (projection energy only)
-        scores = self._compute_alignment_scores(expert_Vs, R)
-        
+
+        # Step 4: Compute alignment scores (projection energy) and argmax metrics
+        scores, argmax_metrics = self._compute_alignment_scores(expert_Vs, R)
+
         # Step 5: Create result objects with all derived statistics
         d_model = int(layer_w.gate_w.shape[1])
         results = self._create_alignment_results(
-            layer_w, scores, shuffle_stats, d_model
+            layer_w, scores, shuffle_stats, d_model, argmax_metrics
         )
         
         return results
