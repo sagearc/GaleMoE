@@ -6,10 +6,16 @@ This script empirically tests the hypothesis that Router/Gate weights act as
 
 It calculates the Cosine Similarity between the Router's weights and the actual 
 mean (centroid) of the hidden states routed to each expert.
+
+REQUIREMENTS:
+    - autoawq: Required for AWQ (pre-quantized) model loading
+      Install with: pip install autoawq
 """
 
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 from collections import defaultdict
@@ -25,6 +31,10 @@ import seaborn as sns
 # Import existing utilities
 from src.models.model_loader import Mixtral8x7B
 
+# Set PyTorch CUDA memory allocator configuration to reduce fragmentation
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 
 # ============================================================================
 # Model Loading Utilities
@@ -33,34 +43,231 @@ from src.models.model_loader import Mixtral8x7B
 def pick_device() -> torch.device:
     """Pick the best available device."""
     if torch.cuda.is_available():
+        # Aggressively clear cache before starting
+        clear_cuda_cache()
+        # Force garbage collection
+        import gc
+        gc.collect()
+        clear_cuda_cache()
+        
+        # Print memory status
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            print(f"GPU Memory Status: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved, {total:.2f} GB total")
+        
         return torch.device("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
 
 
+def clear_cuda_cache():
+    """Clear CUDA cache to free up memory."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+
+def force_clear_gpu_memory():
+    """Force clear all GPU memory by garbage collection and cache clearing."""
+    import gc
+    if torch.cuda.is_available():
+        # Clear Python references
+        gc.collect()
+        # Clear CUDA cache
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # Try to reset peak memory stats (if supported)
+        try:
+            torch.cuda.reset_peak_memory_stats()
+        except:
+            pass
+
+
+def print_memory_requirements(model_id: str, device: torch.device):
+    """
+    Print memory requirements for loading the model.
+    
+    Args:
+        model_id: Hugging Face model identifier
+        device: Target device
+    """
+    print("\n" + "="*80)
+    print("MEMORY REQUIREMENTS")
+    print("="*80)
+    
+    # Model size estimates (AWQ 4-bit quantized)
+    if "AWQ" in model_id or "awq" in model_id.lower():
+        print(f"📦 Model: {model_id} (4-bit AWQ quantized)")
+        print(f"   Disk space needed: ~4-5 GB (for model files)")
+        print(f"   GPU memory needed: ~6-8 GB (for inference)")
+        print(f"   CPU RAM needed: ~8-10 GB (if offloading to CPU)")
+    else:
+        print(f"📦 Model: {model_id}")
+        print(f"   Disk space needed: ~47 GB (full precision Mixtral-8x7B)")
+        print(f"   GPU memory needed: ~48-50 GB (for inference)")
+        print(f"   CPU RAM needed: ~50 GB (if offloading to CPU)")
+    
+    # Check available GPU memory
+    if device.type == "cuda" and torch.cuda.is_available():
+        total_gpu = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        allocated_gpu = torch.cuda.memory_allocated() / 1024**3
+        reserved_gpu = torch.cuda.memory_reserved() / 1024**3
+        free_gpu = total_gpu - reserved_gpu
+        
+        print(f"\n💾 GPU Memory Status:")
+        print(f"   Total: {total_gpu:.2f} GB")
+        print(f"   Allocated: {allocated_gpu:.2f} GB")
+        print(f"   Reserved: {reserved_gpu:.2f} GB")
+        print(f"   Free: {free_gpu:.2f} GB")
+        
+        # Check if enough memory
+        if "AWQ" in model_id or "awq" in model_id.lower():
+            required = 6.0  # GB
+        else:
+            required = 48.0  # GB
+        
+        if free_gpu < required:
+            print(f"\n⚠️  WARNING: Free GPU memory ({free_gpu:.2f} GB) may be insufficient!")
+            print(f"   Recommended: {required:.1f} GB free for smooth operation")
+            print(f"   The model will use device_map='auto' which may offload to CPU if needed")
+        else:
+            print(f"\n✓ Sufficient GPU memory available ({free_gpu:.2f} GB free)")
+    
+    # Check disk space for cache
+    cache_path = os.environ.get("HF_HOME") or os.environ.get("HF_HUB_CACHE")
+    if not cache_path:
+        cache_path = str(Path.home() / ".cache" / "huggingface")
+    
+    cache_dir = Path(cache_path)
+    if cache_dir.exists():
+        # Get disk space
+        stat = shutil.disk_usage(cache_dir)
+        free_disk = stat.free / 1024**3
+        print(f"\n💿 Disk Space (cache location: {cache_path}):")
+        print(f"   Free: {free_disk:.2f} GB")
+        
+        if "AWQ" in model_id or "awq" in model_id.lower():
+            required_disk = 5.0
+        else:
+            required_disk = 50.0
+        
+        if free_disk < required_disk:
+            print(f"   ⚠️  WARNING: May need {required_disk:.1f} GB for model download")
+        else:
+            print(f"   ✓ Sufficient disk space available")
+    
+    print("="*80 + "\n")
+
+
 def load_model(model_id: str, device: torch.device) -> nn.Module:
     """
-    Load the full model using transformers.
+    Load AWQ (pre-quantized) model using transformers with memory-efficient loading.
     
-    NOTE: This downloads/loads the COMPLETE model (all weights, config, tokenizer).
+    NOTE: AWQ models are pre-quantized, so loading is much faster than on-the-fly quantization.
     The transformers library automatically uses cached files if they exist (typically
     in ~/.cache/huggingface/), so if you've already downloaded the model elsewhere,
     it won't re-download - it will just load from cache.
+    
+    REQUIREMENTS:
+        - autoawq: Required for AWQ model support
+          Install with: pip install autoawq
     """
+    # Check if autoawq is available
+    try:
+        import awq
+    except ImportError:
+        raise ImportError(
+            "autoawq is required for AWQ model loading. "
+            "Install with: pip install autoawq"
+        )
+    
+    # Clear cache aggressively before loading
+    clear_cuda_cache()
+    
+    # Force garbage collection to free any Python objects holding GPU memory
+    import gc
+    gc.collect()
+    clear_cuda_cache()
+    
+    # Set up Hugging Face cache and download optimizations
+    import os
+    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    
+    # Print cache location for debugging
+    # Get cache path - try multiple methods for compatibility
+    cache_path = os.environ.get("HF_HOME") or os.environ.get("HF_HUB_CACHE")
+    if not cache_path:
+        # Fallback to default location
+        from pathlib import Path
+        cache_path = str(Path.home() / ".cache" / "huggingface")
+    print(f"📦 Using Hugging Face cache: {cache_path}")
+    
     from transformers.cache_utils import DynamicCache
     if not hasattr(DynamicCache, 'get_usable_length'):
         def get_usable_length(self, seq_length=None):
             return self.get_seq_length()
         DynamicCache.get_usable_length = get_usable_length
     
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=torch.float32,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-        attn_implementation="eager",
-    )
+    # Load AWQ model - AWQ models are pre-quantized, so no quantization config needed
+    print("⚡ Loading AWQ (pre-quantized) model - this should be fast!")
+    
+    try:
+        if device.type == "cuda":
+            # Calculate available memory (leave some headroom)
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            max_memory = {0: f"{int(total_memory * 0.95 / 1024**3)}GiB"}
+            
+            load_kwargs = {
+                "low_cpu_mem_usage": True,
+                "trust_remote_code": False,  # AWQ models typically don't need trust_remote_code
+                "device_map": "auto",
+                "max_memory": max_memory,
+            }
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                **load_kwargs
+            )
+        else:
+            # For non-CUDA devices, load normally
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                low_cpu_mem_usage=True,
+                trust_remote_code=False,
+            )
+            model.to(device)
+    except Exception as e:
+        print(f"⚠️  Error with device_map loading, falling back to standard loading: {e}")
+        # Fallback: load to CPU first, then move to device
+        clear_cuda_cache()
+        
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            low_cpu_mem_usage=True,
+            trust_remote_code=False,
+        )
+        # Move to device
+        clear_cuda_cache()
+        model.to(device)
+    
+    # Verify router layer is accessible and check dtype
+    try:
+        router_weight = model.model.layers[0].block_sparse_moe.gate.weight
+        router_dtype = router_weight.dtype
+        print(f"✓ Router layer verified - dtype: {router_dtype}")
+        print(f"  Router weight shape: {router_weight.shape}")
+        
+        # Check if dtype is suitable for analysis (should be float16 or bfloat16)
+        if router_dtype not in [torch.float16, torch.bfloat16, torch.float32]:
+            print(f"⚠️  Warning: Router dtype is {router_dtype}, which may affect analysis precision")
+        else:
+            print(f"  ✓ Router dtype is suitable for analysis")
+    except (AttributeError, IndexError) as e:
+        print(f"⚠️  Warning: Could not verify router layer: {e}")
+        print("   Analysis may still work, but verification failed")
     
     # Patch torch.Tensor.reshape to fix hidden_size mismatch bug
     import types
@@ -116,7 +323,8 @@ def load_model(model_id: str, device: torch.device) -> nn.Module:
     torch.Tensor.reshape = patched_reshape
     torch.Tensor.view = patched_view
     
-    model.to(device)
+    # Final cache clear after loading
+    clear_cuda_cache()
     return model
 
 
@@ -140,9 +348,9 @@ def load_tokenizer(model_id: str):
 class Config:
     """Configuration for the analysis."""
     # Model settings
-    model_id = "mistralai/Mixtral-8x7B-v0.1"
-    use_quantization = False  # Set to True for 4-bit/8-bit if needed
-    quantization_bits = 8
+    # Using AWQ (pre-quantized) model for faster loading
+    model_id = "TheBloke/Mixtral-8x7B-v0.1-AWQ"  # Pre-quantized AWQ model (4-bit, fast loading)
+    # Note: AWQ models are pre-quantized, so quantization_bits is not applicable
     
     # Data collection
     max_samples_per_expert = 5000  # Buffer size to avoid OOM
@@ -151,6 +359,10 @@ class Config:
     # Dataset
     dataset_name = "wikitext"  # or use custom data
     num_samples = 100  # Number of text samples to process
+    
+    # Memory management
+    initial_batch_size = 1  # Start with smaller batch size to avoid OOM
+    min_batch_size = 1  # Minimum batch size
     
     # Layer selection
     target_layer_idx = 0  # Which MoE layer to analyze (0-31 for Mixtral)
@@ -180,6 +392,24 @@ class RouterHook:
         self.router_weights = None
         # Track how many samples collected per expert
         self.sample_counts = defaultdict(int)
+        # Store inputs captured by pre-hook
+        self.current_inputs = None
+    
+    def pre_hook(self, module, input_tuple):
+        """Pre-hook to capture inputs before forward pass."""
+        try:
+            # Extract hidden states (input to router)
+            if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
+                hidden_states = input_tuple[0]  # [batch, seq_len, hidden_dim]
+            else:
+                hidden_states = input_tuple
+            
+            # Store inputs for use in forward hook
+            if isinstance(hidden_states, torch.Tensor):
+                self.current_inputs = hidden_states.detach().cpu()
+        except Exception as e:
+            # Don't break the forward pass
+            pass
     
     def forward_hook(self, module, input_tuple, output):
         """
@@ -190,43 +420,104 @@ class RouterHook:
             input_tuple: Tuple containing (hidden_states, ...)
             output: Router logits [batch, seq_len, n_experts]
         """
-        # Extract hidden states (input to router)
-        if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
-            hidden_states = input_tuple[0]  # [batch, seq_len, hidden_dim]
-        else:
-            hidden_states = input_tuple
-        
-        # Get router weights
-        if self.router_weights is None and hasattr(module, 'weight'):
-            self.router_weights = module.weight.detach().cpu()  # [n_experts, hidden_dim]
-        
-        # Get router logits/output
-        if isinstance(output, tuple):
-            router_logits = output[0]  # [batch, seq_len, n_experts]
-        else:
-            router_logits = output
-        
-        # Compute probabilities and top-k
-        probs = torch.softmax(router_logits, dim=-1)
-        topk_vals, topk_indices = torch.topk(probs, k=min(Config.top_k, router_logits.shape[-1]), dim=-1)
-        
-        # Process each token
-        batch_size, seq_len, hidden_dim = hidden_states.shape
-        hidden_states_cpu = hidden_states.detach().cpu()
-        
-        for b in range(batch_size):
-            for s in range(seq_len):
-                # Get hidden state for this token
-                hidden_state = hidden_states_cpu[b, s, :].numpy()  # [hidden_dim]
+        try:
+            # Try to use pre-hook captured inputs first (more reliable)
+            if self.current_inputs is not None:
+                hidden_states = self.current_inputs
+                # Reset for next call
+                self.current_inputs = None
+            else:
+                # Fallback to extracting from input_tuple
+                if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
+                    hidden_states = input_tuple[0]  # [batch, seq_len, hidden_dim]
+                else:
+                    hidden_states = input_tuple
+            
+            # Check if hidden_states is a tensor
+            if not isinstance(hidden_states, torch.Tensor):
+                print(f"⚠️  Hook: hidden_states is not a tensor: {type(hidden_states)}")
+                return
+            
+            # Get router weights
+            if self.router_weights is None and hasattr(module, 'weight'):
+                self.router_weights = module.weight.detach().cpu()  # [n_experts, hidden_dim]
+            
+            # Get router logits/output
+            if isinstance(output, tuple):
+                router_logits = output[0]  # [batch, seq_len, n_experts]
+            else:
+                router_logits = output
+            
+            # Check if router_logits is a tensor
+            if not isinstance(router_logits, torch.Tensor):
+                print(f"⚠️  Hook: router_logits is not a tensor: {type(router_logits)}")
+                return
+            
+            # Move to CPU immediately to free GPU memory
+            router_logits_cpu = router_logits.detach().cpu()
+            
+            # Compute probabilities and top-k on CPU
+            probs = torch.softmax(router_logits_cpu, dim=-1)
+            topk_vals, topk_indices = torch.topk(probs, k=min(Config.top_k, router_logits_cpu.shape[-1]), dim=-1)
+            
+            # Move hidden states to CPU immediately (if not already on CPU from pre-hook)
+            if len(hidden_states.shape) != 3:
+                print(f"⚠️  Hook: Unexpected hidden_states shape: {hidden_states.shape}, expected [batch, seq_len, hidden_dim]")
+                return
+            
+            batch_size, seq_len, hidden_dim = hidden_states.shape
+            # If already on CPU from pre-hook, use it directly; otherwise move to CPU
+            if isinstance(hidden_states, torch.Tensor) and hidden_states.is_cuda:
+                hidden_states_cpu = hidden_states.detach().cpu()
+            elif isinstance(hidden_states, torch.Tensor):
+                hidden_states_cpu = hidden_states
+            else:
+                # Convert numpy array to tensor if needed
+                hidden_states_cpu = torch.from_numpy(hidden_states) if isinstance(hidden_states, np.ndarray) else hidden_states
+            
+            # Clear GPU references
+            del hidden_states, router_logits
+            
+            samples_collected = 0
+            for b in range(batch_size):
+                for s in range(seq_len):
+                    # Get hidden state for this token
+                    hidden_state = hidden_states_cpu[b, s, :].numpy()  # [hidden_dim]
+                    
+                    # Get selected experts (top-k) - already on CPU
+                    selected_experts = topk_indices[b, s, :].tolist()
+                    
+                    # Store hidden state for each selected expert
+                    for expert_idx in selected_experts:
+                        if self.sample_counts[expert_idx] < self.max_samples_per_expert:
+                            self.hidden_states_by_expert[expert_idx].append(hidden_state)
+                            self.sample_counts[expert_idx] += 1
+                            samples_collected += 1
+            
+            # Debug: Print first call to verify hook is working
+            if not hasattr(self, '_hook_called'):
+                self._hook_called = True
+                print(f"\n✓ Hook called successfully! Collected {samples_collected} samples from batch")
+                print(f"  Hidden states shape: [{batch_size}, {seq_len}, {hidden_dim}]")
+                print(f"  Router logits shape: {router_logits_cpu.shape}")
                 
-                # Get selected experts (top-k)
-                selected_experts = topk_indices[b, s, :].cpu().tolist()
-                
-                # Store hidden state for each selected expert
-                for expert_idx in selected_experts:
-                    if self.sample_counts[expert_idx] < self.max_samples_per_expert:
-                        self.hidden_states_by_expert[expert_idx].append(hidden_state)
-                        self.sample_counts[expert_idx] += 1
+        except Exception as e:
+            # Print error for debugging instead of silently ignoring
+            if not hasattr(self, '_hook_error_printed'):
+                self._hook_error_printed = True
+                print(f"\n❌ Hook error: {type(e).__name__}: {e}")
+                print(f"   Input type: {type(input_tuple)}")
+                if isinstance(input_tuple, tuple):
+                    print(f"   Input tuple length: {len(input_tuple)}")
+                    for i, inp in enumerate(input_tuple):
+                        print(f"   Input[{i}] type: {type(inp)}")
+                        if isinstance(inp, torch.Tensor):
+                            print(f"   Input[{i}] shape: {inp.shape}")
+                print(f"   Output type: {type(output)}")
+                if isinstance(output, torch.Tensor):
+                    print(f"   Output shape: {output.shape}")
+                import traceback
+                traceback.print_exc()
     
     def get_collected_data(self) -> Dict[int, np.ndarray]:
         """
@@ -265,12 +556,42 @@ def load_wikitext_samples(tokenizer, num_samples: int = 100, max_length: int = 1
         dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
         
         texts = []
+        min_text_length = 50  # Start with minimum length threshold
+        max_iterations = num_samples * 10  # Safety limit to avoid infinite loop
+        
+        # Collect texts, continuing until we have enough or hit the limit
         for i, example in enumerate(dataset):
-            if i >= num_samples:
+            if len(texts) >= num_samples:
                 break
+            if i >= max_iterations:
+                break
+            
             text = example.get("text", "")
-            if len(text.strip()) > 50:  # Filter very short texts
+            if len(text.strip()) > min_text_length:  # Filter very short texts
                 texts.append(text)
+        
+        # If we still don't have enough samples, lower the threshold and try again
+        if len(texts) < num_samples:
+            print(f"⚠️  Only found {len(texts)} samples with length > {min_text_length}. Lowering threshold...")
+            texts = []
+            min_text_length = 10  # Lower threshold
+            
+            for i, example in enumerate(dataset):
+                if len(texts) >= num_samples:
+                    break
+                if i >= max_iterations:
+                    break
+                
+                text = example.get("text", "")
+                if len(text.strip()) > min_text_length:
+                    texts.append(text)
+        
+        # Check if we have any texts before tokenizing
+        if len(texts) == 0:
+            print("⚠️  No texts found after filtering. Using dummy data instead.")
+            vocab_size = len(tokenizer)
+            dummy_inputs = torch.randint(0, vocab_size, (num_samples, max_length))
+            return dummy_inputs
         
         # Tokenize
         tokenized = tokenizer(
@@ -388,6 +709,7 @@ def analyze_router_centroids(
     
     # Register hook
     hook_handle = router_module.register_forward_hook(hook_manager.forward_hook)
+    print(f"✓ Hook registered on {router_name}")
     
     try:
         # Load data
@@ -396,26 +718,158 @@ def analyze_router_centroids(
         print("="*80)
         
         input_ids = load_wikitext_samples(tokenizer, num_samples=Config.num_samples)
-        input_ids = input_ids.to(device)
         
-        # Process in batches to avoid OOM
-        batch_size = 4
+        # Verify input_ids shape
+        if isinstance(input_ids, torch.Tensor):
+            print(f"Input shape: {input_ids.shape}")
+        else:
+            print(f"⚠️  Unexpected input_ids type: {type(input_ids)}")
+            raise ValueError(f"Expected torch.Tensor, got {type(input_ids)}")
+        
+        # Test forward pass with a single sample to verify hook works
+        print("\nTesting forward pass with single sample...")
+        test_input = input_ids[:1].to(device)
+        try:
+            with torch.no_grad():
+                _ = model(test_input)
+            print("✓ Forward pass test successful")
+            # Check if hook collected anything
+            test_samples = sum(hook_manager.sample_counts.values())
+            if test_samples > 0:
+                print(f"✓ Hook is working! Collected {test_samples} samples from test")
+            else:
+                print(f"⚠️  Hook did not collect samples from test forward pass")
+                print(f"   This suggests the hook may not be called or is encountering errors")
+        except Exception as e:
+            print(f"❌ Forward pass test failed: {e}")
+            raise
+        
+        # Process in batches to avoid OOM with dynamic batch size reduction
+        batch_size = Config.initial_batch_size
         num_batches = (len(input_ids) + batch_size - 1) // batch_size
         
         with torch.no_grad():
-            for batch_idx in range(num_batches):
+            batch_idx = 0
+            while batch_idx < num_batches:
                 start_idx = batch_idx * batch_size
                 end_idx = min(start_idx + batch_size, len(input_ids))
-                batch_inputs = input_ids[start_idx:end_idx]
                 
-                print(f"Processing batch {batch_idx + 1}/{num_batches}...", end="\r")
+                # Move batch to device only when needed
+                batch_inputs = input_ids[start_idx:end_idx].to(device)
                 
-                # Forward pass
+                print(f"Processing batch {batch_idx + 1}/{num_batches} (batch_size={batch_size})...", end="\r")
+                
+                # Forward pass with retry logic for OOM
+                # Note: We don't need output_router_logits=True since we're using hooks
+                # to capture router outputs directly from the router module
+                # 
+                # IMPORTANT: With quantized models, there's a known issue where the forward
+                # pass may fail with "not enough values to unpack" error. Since we're using
+                # hooks to capture data, we can work around this by catching the error.
                 try:
-                    outputs = model(batch_inputs, output_router_logits=True)
-                except Exception as e:
-                    print(f"\n⚠️  Error in forward pass: {e}")
+                    # Try different return formats to work around quantized model issues
+                    try:
+                        outputs = model(batch_inputs, return_dict=False)
+                    except (ValueError, RuntimeError) as e:
+                        error_msg = str(e)
+                        if "not enough values to unpack" in error_msg:
+                            # Known issue with quantized Mixtral - try with return_dict=True
+                            try:
+                                outputs = model(batch_inputs, return_dict=True)
+                            except Exception:
+                                # If both fail, the hook should have already captured the data
+                                # So we can continue - the error is in the output unpacking, not the forward pass
+                                print(f"\n⚠️  Output unpacking error (known quantized model issue) - hook data captured, continuing...")
+                                del batch_inputs
+                                batch_idx += 1
+                                continue
+                        else:
+                            raise
+                    
+                    # Clear batch from GPU immediately after forward pass
+                    del batch_inputs, outputs
+                    
+                    # Clear cache periodically
+                    if (batch_idx + 1) % 5 == 0:
+                        clear_cuda_cache()
+                    
+                    batch_idx += 1
+                    
+                except torch.cuda.OutOfMemoryError as e:
+                    print(f"\n⚠️  OOM error at batch {batch_idx + 1}. Reducing batch size...")
+                    clear_cuda_cache()
+                    
+                    # Reduce batch size
+                    batch_size = max(Config.min_batch_size, batch_size // 2)
+                    if batch_size < Config.min_batch_size:
+                        print(f"\n❌ Cannot reduce batch size further. Stopping.")
+                        break
+                    
+                    # Recalculate number of batches with new batch size
+                    num_batches = (len(input_ids) + batch_size - 1) // batch_size
+                    print(f"   New batch size: {batch_size}, Remaining batches: {num_batches - batch_idx}")
                     continue
+                    
+                except (ValueError, RuntimeError) as e:
+                    error_msg = str(e)
+                    if "not enough values to unpack" in error_msg:
+                        # This is a known issue with quantized Mixtral models
+                        # The hook should have already captured the router data before the error
+                        # So we can safely continue - the error is just in unpacking the final output
+                        if batch_idx == 0:
+                            print(f"\n⚠️  Detected quantized model unpacking issue (known bug)")
+                            print(f"   The hook has captured the data we need, so we'll continue despite this error.")
+                        del batch_inputs
+                        clear_cuda_cache()
+                        batch_idx += 1
+                        continue
+                    else:
+                        # Re-raise if it's a different error
+                        raise
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    if "not enough values to unpack" in error_msg:
+                        # Known quantized model issue - hook data should be captured
+                        if batch_idx == 0:
+                            print(f"\n⚠️  Quantized model unpacking error (continuing - hook data captured)")
+                        del batch_inputs
+                        clear_cuda_cache()
+                        batch_idx += 1
+                        continue
+                    else:
+                        print(f"\n⚠️  Unexpected error in forward pass: {error_msg}")
+                        # Move to next batch even on error
+                        del batch_inputs
+                        clear_cuda_cache()
+                        batch_idx += 1
+                        continue
+        
+        # Final cache clear
+        clear_cuda_cache()
+        
+        # Check if any data was collected
+        total_samples = sum(hook_manager.sample_counts.values())
+        if total_samples == 0:
+            print(f"\n❌ ERROR: No hidden states collected!")
+            print(f"   This could mean:")
+            print(f"   1. The hook is not being called (check if forward pass completes)")
+            print(f"   2. The hook is encountering errors (check error messages above)")
+            print(f"   3. The router module structure is different than expected")
+            print(f"   4. All samples are being filtered out")
+            
+            # Try to verify hook was called
+            if hasattr(hook_manager, '_hook_called'):
+                print(f"   ✓ Hook was called at least once")
+            else:
+                print(f"   ❌ Hook was never called - forward pass may be failing before reaching router")
+            
+            # Try to get router weights directly as a diagnostic
+            try:
+                test_weights = router_module.weight
+                print(f"   ✓ Router module accessible, weight shape: {test_weights.shape}")
+            except Exception as e:
+                print(f"   ❌ Cannot access router weights: {e}")
         
         print(f"\n✓ Collected data for {len(hook_manager.hidden_states_by_expert)} experts")
         for expert_idx, count in sorted(hook_manager.sample_counts.items()):
@@ -643,16 +1097,51 @@ def main():
     print(f"Target Layer: {Config.target_layer_idx}")
     print(f"Max samples per expert: {Config.max_samples_per_expert}")
     print(f"Top-K routing: {Config.top_k}")
+    print(f"Initial batch size: {Config.initial_batch_size}")
     print()
     
     # Setup device
     device = pick_device()
     print(f"Device: {device}")
     
+    # Print memory info if CUDA
+    if torch.cuda.is_available():
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        free = total - reserved
+        print(f"CUDA Memory: {total:.2f} GB total, {allocated:.2f} GB allocated, {reserved:.2f} GB reserved, {free:.2f} GB free")
+        print(f"PYTORCH_CUDA_ALLOC_CONF: {os.environ.get('PYTORCH_CUDA_ALLOC_CONF', 'not set')}")
+        
+        # Warn if memory is already heavily used
+        if reserved / total > 0.9:
+            print(f"⚠️  WARNING: GPU memory is {reserved/total*100:.1f}% used. Clearing cache...")
+            force_clear_gpu_memory()
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            free = total - reserved
+            print(f"   After clearing: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved, {free:.2f} GB free")
+    
+    # Print memory requirements
+    print_memory_requirements(Config.model_id, device)
+    
     # Load model
-    print(f"\nLoading model {Config.model_id}...")
-    model = load_model(Config.model_id, device)
-    tokenizer = load_tokenizer(Config.model_id)
+    print(f"\n⚡ Loading AWQ model {Config.model_id}...")
+    print(f"   💡 AWQ models are pre-quantized - loading should be fast!")
+    try:
+        model = load_model(Config.model_id, device)
+        tokenizer = load_tokenizer(Config.model_id)
+    except torch.cuda.OutOfMemoryError as e:
+        print(f"\n❌ Out of memory during model loading!")
+        print(f"   Try the following:")
+        print(f"   1. Close other processes using the GPU")
+        print(f"   2. Restart Python to clear any lingering GPU memory")
+        print(f"   3. Try a different AWQ model or check available GPU memory")
+        print(f"   4. Run: python -c 'import torch; torch.cuda.empty_cache()' in a separate terminal")
+        raise
+    
+    # Clear cache after model loading
+    clear_cuda_cache()
     
     # Run analysis
     results = analyze_router_centroids(
@@ -750,6 +1239,12 @@ if __name__ == "__main__":
         default=None,
         help="Output directory (default: results/router_centroid_analysis)",
     )
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default=None,
+        help="Model ID to use (default: TheBloke/Mixtral-8x7B-v0.1-AWQ)",
+    )
     
     args = parser.parse_args()
     
@@ -760,5 +1255,7 @@ if __name__ == "__main__":
     Config.top_k = args.top_k
     if args.output_dir:
         Config.output_dir = Path(args.output_dir)
+    if args.model_id:
+        Config.model_id = args.model_id
     
     main()

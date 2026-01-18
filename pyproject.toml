@@ -17,8 +17,16 @@ dependencies = [
     "scipy>=1.11.0",
     "safetensors>=0.7.0",
     "seaborn>=0.13.2",
-    "torch>=2.9.1",
-    "torchvision>=0.24.1",
-    "transformers>=4.57.3",
+    # Note: torch version - autoawq was tested with 2.6.0, but newer versions may work
+    # If you encounter issues, try: pip install torch==2.6.0
+    "torch>=2.6.0",
+    # torchvision is optional and not needed for this analysis
+    # Removed to avoid version conflicts with torch
+    # Note: transformers version constrained for autoawq compatibility
+    # autoawq requires transformers <= 4.51.3 (PytorchGELUTanh was removed in newer versions)
+    "transformers>=4.45.0,<=4.51.3",
     "hf-transfer>=0.1.0",
+    "datasets",
+    "autoawq>=0.2.0",
+    "scikit-learn"
 ]
