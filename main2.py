@@ -149,17 +149,41 @@ def save_agg_json(agg, path: str):
 
 def iter_domain_examples() -> Iterable[Tuple[str, str, str]]:
     """
+    Generates a dataset for testing MoE specialization across 4 distinct domains.
     Yields: (domain, example_id, text)
-    Replace with your datasets (code/math/general).
     """
-    examples = [
-        ("general", "g0", "Hello my name is"),
-        ("math", "m0", "Compute the derivative of x^2 + 3x."),
-        ("code", "c0", "Write a Python function that checks if a number is prime."),
-    ]
-    for d, eid, txt in examples:
-        yield d, eid, txt
+    dataset = [
+        # --- Domain: CODE (Syntax heavy, keywords like def, return, import) ---
+        ("code", "c1", "def fibonacci(n): return n if n <= 1 else fibonacci(n-1) + fibonacci(n-2)"),
+        ("code", "c2", "import numpy as np; x = np.array([1, 2, 3]); print(x.mean())"),
+        ("code", "c3", "for i in range(10): if i % 2 == 0: print(f'{i} is even')"),
+        ("code", "c4", "class NeuralNetwork(nn.Module): def __init__(self): super().__init__()"),
+        ("code", "c5", "SELECT * FROM users WHERE signup_date > '2023-01-01' ORDER BY id DESC;"),
 
+        # --- Domain: MATH (Logic heavy, numbers, symbols, latex-like) ---
+        ("math", "m1", "Let x be a real number. Prove that if x^2 is even, then x is even."),
+        ("math", "m2", "Calculate the integral of f(x) = 3x^2 + 2x + 1 from 0 to 5."),
+        ("math", "m3", "The derivative of sin(x) is cos(x), and the derivative of e^x is e^x."),
+        ("math", "m4", "Solve for x: 2x + 5 = 15. Subtract 5 from both sides, then divide by 2."),
+        ("math", "m5", "In a right triangle, a^2 + b^2 = c^2, where c is the hypotenuse."),
+
+        # --- Domain: MEDICAL/BIOLOGY (Specialized terminology) ---
+        ("medical", "b1", "Mitochondria are the powerhouse of the cell, generating ATP through respiration."),
+        ("medical", "b2", "The patient presented with acute tachycardia and elevated blood pressure."),
+        ("medical", "b3", "DNA replication involves enzymes like helicase and DNA polymerase."),
+        ("medical", "b4", "Symptoms of influenza include fever, cough, sore throat, and muscle aches."),
+        ("medical", "b5", "Photosynthesis occurs in the chloroplasts using chlorophyll to absorb light."),
+
+        # --- Domain: LITERATURE/CREATIVE (Narrative, flowery language) ---
+        ("literature", "l1", "The old man sat by the sea, watching the waves crash against the jagged rocks."),
+        ("literature", "l2", "To be, or not to be, that is the question: Whether 'tis nobler in the mind..."),
+        ("literature", "l3", "She walked through the misty forest, the autumn leaves crunching beneath her boots."),
+        ("literature", "l4", "It was the best of times, it was the worst of times, it was the age of wisdom."),
+        ("literature", "l5", "The sun dipped below the horizon, painting the sky in hues of purple and gold.")
+    ]
+
+    for domain, eid, text in dataset:
+        yield domain, eid, text
 
 # ----------------------------
 # Main runner
