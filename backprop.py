@@ -4,6 +4,7 @@ from torch.utils.hooks import RemovableHandle
 from datasets import load_dataset
 from typing import NamedTuple
 import torch
+from datasets.arrow_dataset import Dataset
 
 
 NUM_EXPERTS = 8
@@ -21,26 +22,34 @@ def get_expert_layer_names(layer_name: int = LAYER_NAME):
     expert_layer_names.sort()
     return expert_layer_names
 
-# Hook to capture gate routing decisions
+# Hook to capture gate routing decisions per batch item
 def get_gate_hook(layer_idx, last_token_expert_usage):
     def hook(module, input, output):
         # output is tuple: (final_hidden_states, router_logits)
         # router_logits shape: [batch_size, sequence_length, num_experts]
+        print(f"Gate Layer {layer_idx} - Router logits shape: {output[1].shape}")
         if len(output) > 1 and output[1] is not None:
             router_logits = output[1]
-            # Get the top-k experts for the last token
+            batch_size = router_logits.shape[0]
+            # Get the top-k experts for the last token of each batch item
             last_token_logits = router_logits[:, -1, :]  # [batch, num_experts]
             top_k = torch.topk(last_token_logits, k=2, dim=-1)
-            expert_indices = top_k.indices[0].tolist()  # Convert to list of expert IDs
-            last_token_expert_usage[layer_idx] = set(expert_indices)
+            
+            # Store expert indices for each batch item
+            if layer_idx not in last_token_expert_usage:
+                last_token_expert_usage[layer_idx] = {}
+            
+            for batch_idx in range(batch_size):
+                expert_indices = top_k.indices[batch_idx].tolist()
+                last_token_expert_usage[layer_idx][batch_idx] = set(expert_indices)
     return hook
 
 
 # Define the hook function for expert weights
 def get_w_activation_hook(name, activations):
     def hook(module, input, output: torch.Tensor):
-        # Store activation without retaining grad yet
-        # We'll selectively retain grad after we know which experts were used
+        # Store activation tensor (contains all batch items)
+        # Shape: [total_tokens_processed_by_expert, hidden_dim]
         activations[name] = output
     return hook
 
@@ -75,20 +84,13 @@ def setup_hooks(model, expert_layer_names, layer_name: int = LAYER_NAME):
     return handles, activations, last_token_expert_usage
 
 
-def load_sample_text():
+def load_dataset() -> Dataset:
     """Load WikiText dataset and return a sample."""
     print("\nLoading WikiText dataset...")
-    dataset = load_dataset("wikimedia/wikipedia", "20231101.en")
-    
-    # Find a non-empty sample
-    sample_text = None
-    for i in range(len(dataset)):
-        if len(dataset[i]["text"].strip()) > 100:
-            sample_text = dataset[i]["text"]
-            break
-    
-    print(f"Sample text: {sample_text[:200]}...")
-    return sample_text
+    ds: Dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train")
+    ds = ds.remove_columns(["url", "text"])
+    ds = ds.shuffle(seed=42)
+    return ds
 
 
 def run_forward_pass(model, tokenizer, sample_text, activations, last_token_expert_usage):
@@ -103,13 +105,33 @@ def run_forward_pass(model, tokenizer, sample_text, activations, last_token_expe
     # Forward pass with real inputs
     output = model(input_ids=input_ids, attention_mask=attention_mask, output_router_logits=True)
     
-    # After forward pass, retain gradients for all expert activations
-    print(f"\n--- Experts Used for Last Token ---")
-    for layer_idx, expert_ids in last_token_expert_usage.items():
-        print(f"Layer {layer_idx}: Experts {expert_ids}")
+    batch_size = input_ids.shape[0]
+    
+    # Create per-token expert-activation mapping
+    print(f"\n{'='*80}")
+    print(f"BATCH EXPERT-ACTIVATION MAPPING (Last Token)")
+    print(f"{'='*80}")
+    
+    for batch_idx in range(batch_size):
+        print(f"\n--- Batch Item {batch_idx} (Last Token) ---")
+        
+        for layer_idx in sorted(last_token_expert_usage.keys()):
+            if batch_idx in last_token_expert_usage[layer_idx]:
+                expert_ids = last_token_expert_usage[layer_idx][batch_idx]
+                print(f"  Layer {layer_idx}: Experts {sorted(expert_ids)}")
+                
+                # Log activations for this layer's experts
+                for expert_id in sorted(expert_ids):
+                    for weight_type in EXPERT_IDS:
+                        act_name = f"layers.{layer_idx}.experts.{expert_id}.w{weight_type}"
+                        if act_name in activations:
+                            act_shape = activations[act_name].shape
+                            print(f"    -> {act_name}: shape {act_shape}")
+    
+    print(f"\n{'='*80}\n")
     
     # Retain gradients for all activations (all 14336 neurons per expert)
-    print(f"\n--- Retaining Gradients for All Expert Activations ---")
+    print(f"--- Retaining Gradients for All Expert Activations ---")
     for name, activation in activations.items():
         activation.retain_grad()
         print(f"Retaining grad for {name}, shape: {activation.shape}")
@@ -184,4 +206,3 @@ if __name__ == "__main__":
     # Cleanup hooks
     for handle in handles:
         handle.remove()
-
