@@ -18,12 +18,13 @@ NUM_EXPERTS = 8
 W_IDS = (1, 3)
 LAYER_IDX = 20
 
+cache = {}
 
-class ExpertLayerInfo(NamedTuple):
+class Key(NamedTuple):
     layer_idx: int
     expert_id: int
-    weight_type: int
-    path: str
+    w_id: int
+    row_idx: int
 
 # Monkey-patched MixtralBlockSparseTop2MLP.forward method
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
@@ -41,10 +42,23 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
     values_of_last = W1x[is_last]
     print(f"Expert {self.galemoe_expert_id} - Values of W1x for last tokens in sequence: {values_of_last.shape}")
 
-    # save (row id, layer, expert id) -> values
-    
+    # save to cache
+    for row_idx in row_ids_of_last.tolist():
+        key1 = Key(
+            layer_idx=self.galemoe_layer_idx,
+            expert_id=self.galemoe_expert_id,
+            w_id=1,
+            row_idx=row_idx,
+        )
+        cache[key1] = W1x.cpu()
 
-
+        key3 = Key(
+            layer_idx=self.galemoe_layer_idx,
+            expert_id=self.galemoe_expert_id,
+            w_id=3,
+            row_idx=row_idx,
+        )
+        cache[key3] = W3x.cpu()
 
     current_hidden_states = self.act_fn(W1x) * W3x
     current_hidden_states = self.w2(current_hidden_states)
@@ -202,3 +216,8 @@ if __name__ == "__main__":
     output, input_ids, batch_size, last_token_positions = run_forward_pass(
         model, tokenizer, batch_text
     )
+
+    print("\n---- Cached Weights ----")
+    print(cache.popitem())
+    print(len(cache), "weights cached.")
+
