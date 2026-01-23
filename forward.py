@@ -1,9 +1,9 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 from torch.utils.hooks import RemovableHandle
-from datasets import load_dataset
+# from datasets import load_dataset
 from typing import Dict, List, Set, NamedTuple, Optional
-from datasets.arrow_dataset import Dataset
+# from datasets.arrow_dataset import Dataset
 import json
 from transformers.models.mixtral.modeling_mixtral import MixtralForCausalLM, MoeCausalLMOutputWithPast
 from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
@@ -15,7 +15,7 @@ import types
 
 
 NUM_EXPERTS = 8
-EXPERT_IDS = (1, 3)
+W_IDS = (1, 3)
 LAYER_IDX = 20
 
 
@@ -28,6 +28,7 @@ class ExpertLayerInfo(NamedTuple):
 # Monkey-patched MixtralBlockSparseTop2MLP.forward method
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
     """ """
+    print(f"Expert {self.galemoe_expert_id} - Top-x indices: {top_x}")
     is_last = ((top_x + 1) % sequence_length) == 0
     hidden_states = hidden_states[0]
     W1x = self.w1(hidden_states)
@@ -70,7 +71,7 @@ def patched_sparse_moe_block_forward(self: MixtralSparseMoeBlock, hidden_states:
             # the current expert. We need to make sure to multiply the output hidden
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-            current_hidden_states = expert_layer(current_state, top_x, sequence_length) * routing_weights[top_x, idx, None]
+            current_hidden_states = expert_layer(hidden_states=current_state, top_x=top_x, sequence_length=sequence_length) * routing_weights[top_x, idx, None]
 
             # However `index_add_` only support torch tensors for indexing so we'll use
             # the `top_x` tensor here.
@@ -79,28 +80,28 @@ def patched_sparse_moe_block_forward(self: MixtralSparseMoeBlock, hidden_states:
         return final_hidden_states, router_logits
 
 
-def get_expert_layer_names(layer_idx: int = LAYER_IDX) -> List[ExpertLayerInfo]:
-    """Generate list of expert layer names to hook with metadata."""
-    expert_layer_info = []
-    for j in range(NUM_EXPERTS):
-        for k in EXPERT_IDS:
-            layer_path = f"model.layers.{layer_idx}.block_sparse_moe.experts.{j}.w{k}"
-            expert_metadata = ExpertLayerInfo(
-                layer_idx=layer_idx,
-                expert_id=j,
-                weight_type=k,
-                path=layer_path,
-            )
-            expert_layer_info.append(expert_metadata)
-    return expert_layer_info
+# def get_expert_layer_names(layer_idx: int = LAYER_IDX) -> List[ExpertLayerInfo]:
+#     """Generate list of expert layer names to hook with metadata."""
+#     expert_layer_info = []
+#     for j in range(NUM_EXPERTS):
+#         for k in W_IDS:
+#             layer_path = f"model.layers.{layer_idx}.block_sparse_moe.experts.{j}.w{k}"
+#             expert_metadata = ExpertLayerInfo(
+#                 layer_idx=layer_idx,
+#                 expert_id=j,
+#                 weight_type=k,
+#                 path=layer_path,
+#             )
+#             expert_layer_info.append(expert_metadata)
+#     return expert_layer_info
 
-def load_wiki_dataset() -> Dataset:
-    """Load Wikipedia dataset and return it with only title column."""
-    print("\nLoading Wikipedia dataset...")
-    ds: Dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train")
-    ds = ds.remove_columns(["url", "text"])
-    ds = ds.shuffle(seed=42)
-    return ds
+# def load_wiki_dataset() -> Dataset:
+#     """Load Wikipedia dataset and return it with only title column."""
+#     print("\nLoading Wikipedia dataset...")
+#     ds: Dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train")
+#     ds = ds.remove_columns(["url", "text"])
+#     ds = ds.shuffle(seed=42)
+#     return ds
 
 
 def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
@@ -150,15 +151,25 @@ if __name__ == "__main__":
 
     config = model.config
     
-    # Monkey-patch all MixtralSparseMoeBlock forward methods
-    for name, module in model.named_modules():
-        if isinstance(module, MixtralSparseMoeBlock):
-            # Bind the patched function as a method to this specific module instance
-            module.forward = types.MethodType(patched_sparse_moe_block_forward, module)
-            print(f"Patched forward method at {name}")
-        elif isinstance(module, MixtralBlockSparseTop2MLP):
+    named_modules = dict(model.named_modules())
+
+    print("Patching MixtralSparseMoeBlock and MixtralBlockSparseTop2MLP forward methods...")
+    for layer_idx in [0, 1, LAYER_IDX]:
+        layer_path = f"model.layers.{layer_idx}.block_sparse_moe"
+        module = named_modules[layer_path]
+        assert isinstance(module, MixtralSparseMoeBlock)
+        module.forward = types.MethodType(patched_sparse_moe_block_forward, module)
+        module.galemoe_layer_idx = layer_idx
+
+        for expert in range(NUM_EXPERTS):
+            layer_path = f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert}"
+            module = named_modules[layer_path]
+            assert isinstance(module, MixtralBlockSparseTop2MLP)
             module.forward = types.MethodType(patched_block_sparse_top2_mlp_forward, module)
-            print(f"Patched forward method at {name}")
+            module.galemoe_expert_id = expert
+            module.galemoe_layer_idx = layer_idx
+
+
     
     # Set model to evaluation mode
     model.eval()
@@ -166,11 +177,16 @@ if __name__ == "__main__":
     # Set padding token
     tokenizer.pad_token = tokenizer.eos_token
     
-    expert_layer_info = get_expert_layer_names(layer_idx=LAYER_IDX)
+    # expert_layer_info = get_expert_layer_names(layer_idx=LAYER_IDX)
     
     # Load data and run forward pass
-    ds = load_wiki_dataset()
-    batch_text = [ds[i]["title"] for i in range(1000)]  # Process 3 samples
+    # ds = load_wiki_dataset()
+    # batch_text = [ds[i]["title"] for i in range(1000)]  # Process 3 samples
+    batch_text = [
+        "Artificial intelligence",
+        "Brown fox",
+        "OpenAI"
+    ]
     output, input_ids, batch_size, last_token_positions = run_forward_pass(
         model, tokenizer, batch_text
     )
