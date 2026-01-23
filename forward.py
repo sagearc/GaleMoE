@@ -26,7 +26,17 @@ class ExpertLayerInfo(NamedTuple):
     path: str
 
 
-def patched_moe_forward(self: MixtralSparseMoeBlock, hidden_states: torch.Tensor):
+def patched_block_sparese_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
+    """ """
+    is_last = ((top_x + 1) % sequence_length) == 0
+    if is_last.any():
+        print(f"Batch contains last token(s) at positions: {torch.nonzero(is_last).squeeze().tolist()}")
+    hidden_states = hidden_states[0]
+    current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+    current_hidden_states = self.w2(current_hidden_states)
+    return current_hidden_states
+
+def patched_sparse_moe_block_forward(self: MixtralSparseMoeBlock, hidden_states: torch.Tensor):
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         if self.training and self.jitter_noise > 0:
@@ -95,17 +105,6 @@ def get_w_activation_hook(expert_layer_info: ExpertLayerInfo, activations: Dict[
     """Capture W1 and W3 activations and track token routing."""
     layer_idx = expert_layer_info.layer_idx
     expert_id = expert_layer_info.expert_id
-
-    def pre_hook(module, input):
-        # input is a tuple; we want the first element which is the input tensor
-        hidden_states, top_x, seq_len = input
-        is_last = ((top_x + 1) % seq_len) == 0
-        print(f"----- Expert {expert_id} -----")
-        print(f"Processing Expert {expert_id} (is_last: {is_last})")
-        print(f"Expert {expert_id} - Processing {hidden_states.shape[0]} tokens")
-        print(f"Top-x shape: {top_x.shape}")
-        print()
-        return hidden_states
     
     def hook(module, input, output: torch.Tensor):
         print("-----INPUT---------")
@@ -123,7 +122,7 @@ def get_w_activation_hook(expert_layer_info: ExpertLayerInfo, activations: Dict[
         if expert_id not in token_routing[layer_idx]:
             token_routing[layer_idx][expert_id] = True
             
-    return pre_hook, hook
+    return hook
 
 def get_gate_logits_hook(layer_idx: int, token_routing):
     """Hook to capture gate logits and track token routing."""
@@ -162,7 +161,7 @@ def setup_hooks(model: torch.nn.Module, expert_layer_info: List[ExpertLayerInfo]
     # Register expert weight hooks with metadata
     for info in expert_layer_info:
         target_layer = named_modules[info.path]
-        pre_hook, hook = get_w_activation_hook(
+        hook = get_w_activation_hook(
             info,
             activations, 
             token_routing
@@ -170,10 +169,9 @@ def setup_hooks(model: torch.nn.Module, expert_layer_info: List[ExpertLayerInfo]
         
         act_name = f"layers.{info.layer_idx}.experts.{info.expert_id}.w{info.weight_type}"
         print(f"Registering hook on: {act_name}")
-        
-        pre_handle = target_layer.register_forward_pre_hook(pre_hook)
+
         handle = target_layer.register_forward_hook(hook)
-        handles += [pre_handle, handle]
+        handles.append(handle)
     
     print(f"Registered {len(handles)} expert hooks.")
     
@@ -310,7 +308,10 @@ if __name__ == "__main__":
     for name, module in model.named_modules():
         if isinstance(module, MixtralSparseMoeBlock):
             # Bind the patched function as a method to this specific module instance
-            module.forward = types.MethodType(patched_moe_forward, module)
+            module.forward = types.MethodType(patched_sparse_moe_block_forward, module)
+            print(f"Patched forward method at {name}")
+        elif isinstance(module, MixtralBlockSparseTop2MLP):
+            module.forward = types.MethodType(patched_block_sparese_top2_mlp_forward, module)
             print(f"Patched forward method at {name}")
     
     # Set model to evaluation mode
