@@ -29,10 +29,22 @@ class ExpertLayerInfo(NamedTuple):
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
     """ """
     print(f"Expert {self.galemoe_expert_id} - Top-x indices: {top_x}")
-    is_last = ((top_x + 1) % sequence_length) == 0
-    hidden_states = hidden_states[0]
+
     W1x = self.w1(hidden_states)
     W3x = self.w3(hidden_states)
+
+    is_last = ((top_x + 1) % sequence_length) == 0
+    row_ids = top_x // sequence_length
+    row_ids_of_last = row_ids[is_last]
+    print("shapes:", W1x.shape, W3x.shape)
+    print(f"Expert {self.galemoe_expert_id} - Row IDs of last tokens in sequence: {row_ids_of_last}")
+    values_of_last = W1x[is_last]
+    print(f"Expert {self.galemoe_expert_id} - Values of W1x for last tokens in sequence: {values_of_last.shape}")
+
+    # save (row id, layer, expert id) -> values
+    
+
+
 
     current_hidden_states = self.act_fn(W1x) * W3x
     current_hidden_states = self.w2(current_hidden_states)
