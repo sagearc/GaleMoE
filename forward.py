@@ -25,8 +25,8 @@ class ExpertLayerInfo(NamedTuple):
     weight_type: int
     path: str
 
-
-def patched_block_sparese_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
+# Monkey-patched MixtralBlockSparseTop2MLP.forward method
+def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
     """ """
     is_last = ((top_x + 1) % sequence_length) == 0
     if is_last.any():
@@ -40,6 +40,8 @@ def patched_block_sparese_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidd
     current_hidden_states = self.w2(current_hidden_states)
     return current_hidden_states
 
+
+# Monkey-patched MixtralSparseMoeBlock.forward method
 def patched_sparse_moe_block_forward(self: MixtralSparseMoeBlock, hidden_states: torch.Tensor):
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
@@ -158,7 +160,7 @@ if __name__ == "__main__":
             module.forward = types.MethodType(patched_sparse_moe_block_forward, module)
             print(f"Patched forward method at {name}")
         elif isinstance(module, MixtralBlockSparseTop2MLP):
-            module.forward = types.MethodType(patched_block_sparese_top2_mlp_forward, module)
+            module.forward = types.MethodType(patched_block_sparse_top2_mlp_forward, module)
             print(f"Patched forward method at {name}")
     
     # Set model to evaluation mode
