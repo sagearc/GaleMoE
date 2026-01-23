@@ -52,20 +52,12 @@ def patched_moe_forward(self: MixtralSparseMoeBlock, hidden_states: torch.Tensor
         expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
         for expert_idx in expert_hit:
             expert_layer = self.experts[expert_idx]
-            is_last = ((top_x + 1) == self.num_experts)
-            print(f"Processing Expert {expert_idx.item()} (is_last: {is_last.any().item()})")
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
-            print(f"----- Expert {expert_idx.item()} -----")
-            print(f"Expert {expert_idx.item()} - Processing {top_x.shape[0]} tokens")
-            print(f"Top-x indices: {top_x}")
-            print(f"Token indices in batch: {idx}")
-            print(f"Routing weights: {routing_weights[top_x, idx]}")
-            print()
             # Index the correct hidden states and compute the expert hidden state for
             # the current expert. We need to make sure to multiply the output hidden
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+            current_hidden_states = expert_layer(current_state, top_x, sequence_length) * routing_weights[top_x, idx, None]
 
             # However `index_add_` only support torch tensors for indexing so we'll use
             # the `top_x` tensor here.
@@ -103,6 +95,17 @@ def get_w_activation_hook(expert_layer_info: ExpertLayerInfo, activations: Dict[
     """Capture W1 and W3 activations and track token routing."""
     layer_idx = expert_layer_info.layer_idx
     expert_id = expert_layer_info.expert_id
+
+    def pre_hook(module, input):
+        # input is a tuple; we want the first element which is the input tensor
+        hidden_states, top_x, seq_len = input
+        is_last = ((top_x + 1) % seq_len) == 0
+        print(f"----- Expert {expert_id} -----")
+        print(f"Processing Expert {expert_id} (is_last: {is_last})")
+        print(f"Expert {expert_id} - Processing {hidden_states.shape[0]} tokens")
+        print(f"Top-x shape: {top_x.shape}")
+        print()
+        return hidden_states
     
     def hook(module, input, output: torch.Tensor):
         print("-----INPUT---------")
@@ -120,7 +123,7 @@ def get_w_activation_hook(expert_layer_info: ExpertLayerInfo, activations: Dict[
         if expert_id not in token_routing[layer_idx]:
             token_routing[layer_idx][expert_id] = True
             
-    return hook
+    return pre_hook, hook
 
 def get_gate_logits_hook(layer_idx: int, token_routing):
     """Hook to capture gate logits and track token routing."""
@@ -159,7 +162,7 @@ def setup_hooks(model: torch.nn.Module, expert_layer_info: List[ExpertLayerInfo]
     # Register expert weight hooks with metadata
     for info in expert_layer_info:
         target_layer = named_modules[info.path]
-        hook = get_w_activation_hook(
+        pre_hook, hook = get_w_activation_hook(
             info,
             activations, 
             token_routing
@@ -168,8 +171,9 @@ def setup_hooks(model: torch.nn.Module, expert_layer_info: List[ExpertLayerInfo]
         act_name = f"layers.{info.layer_idx}.experts.{info.expert_id}.w{info.weight_type}"
         print(f"Registering hook on: {act_name}")
         
+        pre_handle = target_layer.register_forward_pre_hook(pre_hook)
         handle = target_layer.register_forward_hook(hook)
-        handles.append(handle)
+        handles += [pre_handle, handle]
     
     print(f"Registered {len(handles)} expert hooks.")
     
