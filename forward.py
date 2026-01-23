@@ -50,7 +50,7 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
             w_id=1,
             row_idx=row_idx,
         )
-        cache[key1] = W1x.cpu()
+        cache[key1] = W1x[].cpu()
 
         key3 = Key(
             layer_idx=self.galemoe_layer_idx,
