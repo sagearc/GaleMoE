@@ -11,6 +11,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralBlockSparseTop2M
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
+import types
 
 
 NUM_EXPERTS = 8
