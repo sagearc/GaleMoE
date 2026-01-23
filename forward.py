@@ -2,12 +2,15 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 from torch.utils.hooks import RemovableHandle
 from datasets import load_dataset
-from typing import Dict, List, Set, NamedTuple
+from typing import Dict, List, Set, NamedTuple, Optional
 from datasets.arrow_dataset import Dataset
 import json
 from transformers.models.mixtral.modeling_mixtral import MixtralForCausalLM, MoeCausalLMOutputWithPast
 from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
+from transformers.models.mixtral.modeling_mixtral import MixtralBlockSparseTop2MLP, MixtralSparseMoeBlock
 import numpy as np
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 NUM_EXPERTS = 8
@@ -20,6 +23,55 @@ class ExpertLayerInfo(NamedTuple):
     expert_id: int
     weight_type: int
     path: str
+
+
+def patched_moe_forward(self: MixtralSparseMoeBlock, hidden_states: torch.Tensor):
+        """ """
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        if self.training and self.jitter_noise > 0:
+            hidden_states *= torch.empty_like(hidden_states).uniform_(1.0 - self.jitter_noise, 1.0 + self.jitter_noise)
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        # router_logits: (batch * sequence_length, n_experts)
+        router_logits = self.gate(hidden_states)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        # we cast back to the input dtype
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        final_hidden_states = torch.zeros(
+            (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+
+        # One hot encode the selected experts to create an expert mask
+        # this will be used to easily index which expert is going to be sollicitated
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+
+        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            expert_layer = self.experts[expert_idx]
+            is_last = ((top_x + 1) == self.num_experts)
+            print(f"Processing Expert {expert_idx.item()} (is_last: {is_last.any().item()})")
+            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
+            print(f"----- Expert {expert_idx.item()} -----")
+            print(f"Expert {expert_idx.item()} - Processing {top_x.shape[0]} tokens")
+            print(f"Top-x indices: {top_x}")
+            print(f"Token indices in batch: {idx}")
+            print(f"Routing weights: {routing_weights[top_x, idx]}")
+            print()
+            # Index the correct hidden states and compute the expert hidden state for
+            # the current expert. We need to make sure to multiply the output hidden
+            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+
+            # However `index_add_` only support torch tensors for indexing so we'll use
+            # the `top_x` tensor here.
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states, router_logits
+
 
 # NumPy structured dtype for ExpertLayerInfo
 EXPERT_LAYER_INFO_DTYPE = np.dtype([
@@ -67,6 +119,31 @@ def get_w_activation_hook(expert_layer_info: ExpertLayerInfo, activations: Dict[
         if expert_id not in token_routing[layer_idx]:
             token_routing[layer_idx][expert_id] = True
             
+    return hook
+
+def get_gate_logits_hook(layer_idx: int, token_routing):
+    """Hook to capture gate logits and track token routing."""
+    def hook(module, input, output: torch.Tensor):
+        # Output shape (router logits): [batch_size * seq_len, num_experts]
+        print(f"Gate Layer {layer_idx} - Output shape: {output.shape}")
+
+        _, selected_experts = torch.topk(output, k=2, dim=-1)
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=NUM_EXPERTS).permute(2, 1, 0)
+        
+        # Determine top-2 experts for each token
+        top2_experts = output.topk(2, dim=-1).indices  # Shape: [batch_size, seq_len, 2]
+        
+        # Track which experts were used for this layer
+        if layer_idx not in token_routing:
+            token_routing[layer_idx] = {}
+        
+        batch_size, seq_len, _ = top2_experts.shape
+        for b in range(batch_size):
+            for s in range(seq_len):
+                for expert_id in top2_experts[b, s].tolist():
+                    if expert_id not in token_routing[layer_idx]:
+                        token_routing[layer_idx][expert_id] = True
+                    
     return hook
 
 
@@ -131,6 +208,11 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text, activatio
         print(f"Router logits captured during forward pass.")
         print(f"Output logits shape: {len(output.router_logits)} layers") 
         print(f"Output logits shape (layer 0): {output.router_logits[LAYER_IDX].shape}")
+        curr_layer_logits = output.router_logits[LAYER_IDX]  # Shape: [batch_size, seq_len, num_experts]
+        # How many tokens were routed to each expert by top 2 for each token
+        top2_experts = curr_layer_logits.topk(2, dim=-1).indices
+        expert_token_counts = top2_experts.flatten().bincount(minlength=NUM_EXPERTS)
+        print(f"Token counts per expert at layer {LAYER_IDX}: {expert_token_counts.tolist()}")
 
         
     
@@ -216,6 +298,15 @@ def save_activations(batch_activations, filename="activations.pt"):
 if __name__ == "__main__":
     model = MixtralForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", dtype=torch.bfloat16)
     tokenizer = LlamaTokenizerFast.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
+
+    config = model.config
+    
+    # Monkey-patch all MixtralSparseMoeBlock forward methods
+    for name, module in model.named_modules():
+        if isinstance(module, MixtralSparseMoeBlock):
+            # Bind the patched function as a method to this specific module instance
+            module.forward = types.MethodType(patched_moe_forward, module)
+            print(f"Patched forward method at {name}")
     
     # Set model to evaluation mode
     model.eval()
