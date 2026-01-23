@@ -32,7 +32,11 @@ def patched_block_sparese_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidd
     if is_last.any():
         print(f"Batch contains last token(s) at positions: {torch.nonzero(is_last).squeeze().tolist()}")
     hidden_states = hidden_states[0]
-    current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+    W1x = self.w1(hidden_states)
+    W3x = self.w3(hidden_states)
+
+    print(f"W1x shape: {W1x.shape}, type: {type(W1x)}, W3x shape: {W3x.shape}, type: {type(W3x)}")
+    current_hidden_states = self.act_fn(W1x) * W3x
     current_hidden_states = self.w2(current_hidden_states)
     return current_hidden_states
 
@@ -76,14 +80,6 @@ def patched_sparse_moe_block_forward(self: MixtralSparseMoeBlock, hidden_states:
         return final_hidden_states, router_logits
 
 
-# NumPy structured dtype for ExpertLayerInfo
-EXPERT_LAYER_INFO_DTYPE = np.dtype([
-    ('layer_idx', np.int16),
-    ('expert_id', np.int8),
-    ('weight_type', np.int8),
-])
-
-
 def get_expert_layer_names(layer_idx: int = LAYER_IDX) -> List[ExpertLayerInfo]:
     """Generate list of expert layer names to hook with metadata."""
     expert_layer_info = []
@@ -99,85 +95,6 @@ def get_expert_layer_names(layer_idx: int = LAYER_IDX) -> List[ExpertLayerInfo]:
             expert_layer_info.append(expert_metadata)
     return expert_layer_info
 
-
-# Hook for expert weights that tracks which tokens are routed to it
-def get_w_activation_hook(expert_layer_info: ExpertLayerInfo, activations: Dict[ExpertLayerInfo, torch.Tensor], token_routing):
-    """Capture W1 and W3 activations and track token routing."""
-    layer_idx = expert_layer_info.layer_idx
-    expert_id = expert_layer_info.expert_id
-    
-    def hook(module, input, output: torch.Tensor):
-        print("-----INPUT---------")
-        #type
-        print(f"type: {type(input)}")
-        print(f"len: {len(input)}")
-        print(f"input[0] shape: {input[0].shape}")
-        # Store activation tensor
-        # Shape: [num_tokens_routed_to_expert, hidden_dim]
-        activations[expert_layer_info] = output.clone()
-        
-        # Track that this expert was used (tokens will be tracked via batch processing)
-        if layer_idx not in token_routing:
-            token_routing[layer_idx] = {}
-        if expert_id not in token_routing[layer_idx]:
-            token_routing[layer_idx][expert_id] = True
-            
-    return hook
-
-def get_gate_logits_hook(layer_idx: int, token_routing):
-    """Hook to capture gate logits and track token routing."""
-    def hook(module, input, output: torch.Tensor):
-        # Output shape (router logits): [batch_size * seq_len, num_experts]
-        print(f"Gate Layer {layer_idx} - Output shape: {output.shape}")
-
-        _, selected_experts = torch.topk(output, k=2, dim=-1)
-        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=NUM_EXPERTS).permute(2, 1, 0)
-        
-        # Determine top-2 experts for each token
-        top2_experts = output.topk(2, dim=-1).indices  # Shape: [batch_size, seq_len, 2]
-        
-        # Track which experts were used for this layer
-        if layer_idx not in token_routing:
-            token_routing[layer_idx] = {}
-        
-        batch_size, seq_len, _ = top2_experts.shape
-        for b in range(batch_size):
-            for s in range(seq_len):
-                for expert_id in top2_experts[b, s].tolist():
-                    if expert_id not in token_routing[layer_idx]:
-                        token_routing[layer_idx][expert_id] = True
-                    
-    return hook
-
-
-def setup_hooks(model: torch.nn.Module, expert_layer_info: List[ExpertLayerInfo]):
-    """Register expert weight hooks only (no gate hook needed)."""
-    activations: Dict[ExpertLayerInfo, torch.Tensor] = {}
-    token_routing = {}
-    handles = []
-    
-    named_modules = dict(model.named_modules())
-    
-    # Register expert weight hooks with metadata
-    for info in expert_layer_info:
-        target_layer = named_modules[info.path]
-        hook = get_w_activation_hook(
-            info,
-            activations, 
-            token_routing
-        )
-        
-        act_name = f"layers.{info.layer_idx}.experts.{info.expert_id}.w{info.weight_type}"
-        print(f"Registering hook on: {act_name}")
-
-        handle = target_layer.register_forward_hook(hook)
-        handles.append(handle)
-    
-    print(f"Registered {len(handles)} expert hooks.")
-    
-    return handles, activations, token_routing
-
-
 def load_wiki_dataset() -> Dataset:
     """Load Wikipedia dataset and return it with only title column."""
     print("\nLoading Wikipedia dataset...")
@@ -187,7 +104,7 @@ def load_wiki_dataset() -> Dataset:
     return ds
 
 
-def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text, activations, token_routing):
+def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     """Tokenize input, run forward pass, and track expert activations."""
     # Tokenize the input
     inputs = tokenizer(batch_text, return_tensors="pt", truncation=True, max_length=32, padding=True)
@@ -222,79 +139,9 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text, activatio
     # Log which experts were activated
     print(f"\n{'='*80}")
     print(f"EXPERTS ACTIVATED (Layer {LAYER_IDX})")
-    print(f"{'='*80}")
-    
-    for layer_idx in sorted(token_routing.keys()):
-        expert_ids = sorted(token_routing[layer_idx].keys())
-        print(f"Layer {layer_idx}: Experts {expert_ids}")
-    
     print(f"{'='*80}\n")
     
     return output, input_ids, batch_size, last_token_positions
-
-
-def extract_last_token_activations(activations, token_routing, batch_text, layer_idx=LAYER_IDX):
-    """Extract W1 and W3 activations for the batch.
-    
-    Returns: Dict with batch text and activations for each expert that was used
-    """
-    batch_activations = {
-        "texts": batch_text,
-        "layer": layer_idx,
-        "expert_activations": {}
-    }
-    
-    print(f"\nExtracting activations from {len(activations)} expert layers")
-    
-    # Iterate through all activations that were captured
-    for info_key, activation in activations.items():
-        if info_key.layer_idx == layer_idx:
-            # Use string key for output
-            act_name = f"layers.{info_key.layer_idx}.experts.{info_key.expert_id}.w{info_key.weight_type}"
-            batch_activations["expert_activations"][act_name] = activation
-            print(f"  {act_name}: shape {activation.shape}")
-    
-    return batch_activations
-
-
-
-def save_activations(batch_activations, filename="activations.pt"):
-    """Save batch activations to file."""
-    # Convert to saveable format
-    save_data = {
-        "texts": batch_activations["texts"],
-        "layer": batch_activations["layer"],
-        "activations": {}
-    }
-    
-    for expert_name, activation in batch_activations["expert_activations"].items():
-        save_data["activations"][expert_name] = {
-            "activation": activation.cpu(),
-            "shape": list(activation.shape),
-            "mean": activation.mean().item(),
-            "std": activation.std().item(),
-        }
-    
-    torch.save(save_data, filename)
-    print(f"\nSaved activations to {filename}")
-    
-    # Also save a JSON summary
-    summary = {
-        "texts": batch_activations["texts"],
-        "layer": batch_activations["layer"],
-        "activations": {}
-    }
-    
-    for expert_name, activation in batch_activations["expert_activations"].items():
-        summary["activations"][expert_name] = {
-            "shape": list(activation.shape),
-            "mean": float(activation.mean().item()),
-            "std": float(activation.std().item()),
-        }
-    
-    with open(filename.replace(".pt", "_summary.json"), "w") as f:
-        json.dump(summary, f, indent=2)
-    print(f"Saved activation summary to {filename.replace('.pt', '_summary.json')}")
 
 
 
@@ -321,31 +168,10 @@ if __name__ == "__main__":
     tokenizer.pad_token = tokenizer.eos_token
     
     expert_layer_info = get_expert_layer_names(layer_idx=LAYER_IDX)
-    handles, activations, token_routing = setup_hooks(model, expert_layer_info)
     
     # Load data and run forward pass
     ds = load_wiki_dataset()
     batch_text = [ds[i]["title"] for i in range(3)]  # Process 3 samples
     output, input_ids, batch_size, last_token_positions = run_forward_pass(
-        model, tokenizer, batch_text, activations, token_routing
+        model, tokenizer, batch_text
     )
-    
-    # Extract and save activations
-    print("\n---- Extracting Activations ----")
-    batch_activations = extract_last_token_activations(
-        activations, token_routing, batch_text
-    )
-    
-    # Display extracted activations
-    print("\n---- Activation Summary ----")
-    print(f"Texts: {batch_activations['texts']}")
-    print(f"Layer: {batch_activations['layer']}")
-    for expert_name, activation in batch_activations["expert_activations"].items():
-        print(f"  {expert_name}: shape {activation.shape}, mean {activation.mean():.6f}, std {activation.std():.6f}")
-    
-    # Save activations
-    save_activations(batch_activations)
-    
-    # Cleanup hooks
-    for handle in handles:
-        handle.remove()
