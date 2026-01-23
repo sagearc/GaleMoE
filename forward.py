@@ -29,13 +29,10 @@ class ExpertLayerInfo(NamedTuple):
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
     """ """
     is_last = ((top_x + 1) % sequence_length) == 0
-    if is_last.any():
-        print(f"Batch contains last token(s) at positions: {torch.nonzero(is_last).squeeze().tolist()}")
     hidden_states = hidden_states[0]
     W1x = self.w1(hidden_states)
     W3x = self.w3(hidden_states)
 
-    print(f"W1x shape: {W1x.shape}, type: {type(W1x)}, W3x shape: {W3x.shape}, type: {type(W3x)}")
     current_hidden_states = self.act_fn(W1x) * W3x
     current_hidden_states = self.w2(current_hidden_states)
     return current_hidden_states
@@ -173,7 +170,7 @@ if __name__ == "__main__":
     
     # Load data and run forward pass
     ds = load_wiki_dataset()
-    batch_text = [ds[i]["title"] for i in range(3)]  # Process 3 samples
+    batch_text = [ds[i]["title"] for i in range(1000)]  # Process 3 samples
     output, input_ids, batch_size, last_token_positions = run_forward_pass(
         model, tokenizer, batch_text
     )
