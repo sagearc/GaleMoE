@@ -190,7 +190,6 @@ if __name__ == "__main__":
         )
 
         # group by layer, expert, w_id and save to disk
-
         grouped_cache = defaultdict(dict)
         for key, weight in cache.items():
             group = f"layer={key.layer_idx:02}/expert={key.expert_id}/w={key.w_id}"
@@ -203,7 +202,7 @@ if __name__ == "__main__":
             file_path = group_dir / f"{batch_id:05}.safetensors"
             save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
             print(f"Saved {len(tensors)} tensors to {file_path}")
-
-        print("\n---- Cached Weights ----")
-        print(cache.popitem())
-        print(len(cache), "weights cached.")
+        
+        print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
+        cache.clear()
+        assert len(cache) == 0
