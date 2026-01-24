@@ -26,11 +26,10 @@ from src.forward.patched_blocks import (
 
 NUM_EXPERTS = 8
 W_IDS = (1, 3)
-LAYERS_TO_PATCH = [0, 1, 20]
+LAYERS_TO_PATCH = [4, 16, 28]
 
 BATCH_SIZE = 1000
 N_BATCHES = 100
-SAVE_INTERVAL = 10
 
 OUTPUT_DIR = "output"
 WIKI_SEED = 42
@@ -38,14 +37,14 @@ WIKI_SEED = 42
 
 def prepare_output_dir(output_dir: str) -> Path:
     """Prepare output directory structure."""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
+    output_dir: Path = Path(output_dir)
+    output_dir.mkdir()
 
     for layer in LAYERS_TO_PATCH:
         for expert in range(NUM_EXPERTS):
             for w_id in W_IDS:
                 group_dir: Path = output_dir / f"layer={layer:02}/expert={expert}/w={w_id}"
-                group_dir.mkdir(parents=True, exist_ok=True)
+                group_dir.mkdir(parents=True)
     return output_dir
 
 
@@ -83,8 +82,7 @@ def save_cache_to_disk(output_dir: Path):
     for group, tensors in grouped_cache.items():
         group_dir: Path = output_dir / group
         file_path = group_dir / f"{batch_id:05}.safetensors"
-        save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED), "n_batches": str(SAVE_INTERVAL)})
-        print(f"Saved {len(tensors)} tensors to {file_path}")
+        save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
 
 
 def patch_loop(model: MixtralForCausalLM, loop: tqdm):
@@ -114,7 +112,6 @@ if __name__ == "__main__":
     print(f"Layers to patch: {LAYERS_TO_PATCH}")
     print(f"Batch size: {BATCH_SIZE}")
     print(f"Number of batches: {N_BATCHES}")
-    print(f"Save interval: {SAVE_INTERVAL}")
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Wikipedia seed: {WIKI_SEED}")
     print()
@@ -145,7 +142,6 @@ if __name__ == "__main__":
             module.patch_cache = cache
             module.patch_row_idx_to_prompt = row_idx_to_prompt
 
-    ds = load_wiki_dataset(seed=WIKI_SEED)
     for batch_id, batch in  enumerate(loop):
         if batch_id >= N_BATCHES:
             break
@@ -155,13 +151,12 @@ if __name__ == "__main__":
 
         output, input_ids = run_forward_pass(model, tokenizer, row_idx_to_prompt)
 
-        if (batch_id + 1) % SAVE_INTERVAL == 0:
-            loop.set_description(f"Saving batch to disk")
-            # group by layer, expert, w_id and save to disk
-            save_cache_to_disk(output_dir)
-            
-            print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
-            cache.clear()
-            assert len(cache) == 0
+        loop.set_description(f"Saving batch to disk")
+        # group by layer, expert, w_id and save to disk
+        save_cache_to_disk(output_dir)
 
-            loop.set_description("Forward pass")
+        print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
+        cache.clear()
+        assert len(cache) == 0
+
+        loop.set_description("Forward pass")
