@@ -172,7 +172,6 @@ if __name__ == "__main__":
     ds = load_wiki_dataset()
     for batch in ds.iter(BATCH_SIZE):
         for i, (row_id, prompt) in enumerate(zip(batch["id"], batch["title"])):
-            print(i)
             row_idx_to_prompt[i] = (row_id, prompt)
 
         output, input_ids, batch_size, last_token_positions = run_forward_pass(
