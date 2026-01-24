@@ -18,10 +18,11 @@ from transformers.models.mixtral.modeling_mixtral import (
 
 NUM_EXPERTS = 8
 W_IDS = (1, 3)
-LAYER_IDX = 20
+LAYERS_TO_PATCH = [0, 1, 20]
 
 BATCH_SIZE = 3
 N_BATCHES = 10
+SAVE_INTERVAL = 10
 
 OUTPUT_DIR = "output"
 WIKI_SEED = 42
@@ -37,6 +38,17 @@ class Key(NamedTuple):
 cache: dict[Key, torch.Tensor] = {}
 row_idx_to_prompt = [None for _ in range(BATCH_SIZE)]
 
+
+def prepare_output_dir(output_dir: str):
+    """Prepare output directory structure."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    for layer in LAYERS_TO_PATCH:
+        for expert in range(NUM_EXPERTS):
+            for w_id in W_IDS:
+                group_dir: Path = output_dir / f"layer={layer:02}/expert={expert}/w={w_id}"
+                group_dir.mkdir(parents=True, exist_ok=True)
 
 # Monkey-patched MixtralBlockSparseTop2MLP.forward method
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
@@ -145,11 +157,23 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     
     return output, input_ids
 
+def save_cache_to_disk(output_dir: Path):
+    """Save cached tensors to disk."""
+    grouped_cache = defaultdict(dict)
+    for key, weight in cache.items():
+        group = f"layer={key.layer_idx:02}/expert={key.expert_id}/w={key.w_id}"
+        tensor_prompt = f"{key.row_id}.{key.prompt}"
+        grouped_cache[group][tensor_prompt] = weight
+    
+    for group, tensors in grouped_cache.items():
+        group_dir: Path = output_dir / group
+        file_path = group_dir / f"{batch_id:05}.safetensors"
+        save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED), "n_batches": str(SAVE_INTERVAL)})
+        print(f"Saved {len(tensors)} tensors to {file_path}")
 
 
 if __name__ == "__main__":
-    output_dir = Path(OUTPUT_DIR)
-    output_dir.mkdir(exist_ok=True)
+    output_dir = prepare_output_dir(OUTPUT_DIR)
 
     model = MixtralForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", dtype=torch.bfloat16)
     model.eval()
@@ -160,8 +184,7 @@ if __name__ == "__main__":
     named_modules = dict(model.named_modules())
 
     print("Patching MixtralSparseMoeBlock and MixtralBlockSparseTop2MLP forward methods...")
-    layers_to_patch = [0, 1, LAYER_IDX]
-    for layer_idx in layers_to_patch:
+    for layer_idx in LAYERS_TO_PATCH:
         layer_path = f"model.layers.{layer_idx}.block_sparse_moe"
         module = named_modules[layer_path]
         assert isinstance(module, MixtralSparseMoeBlock)
@@ -189,20 +212,10 @@ if __name__ == "__main__":
             model, tokenizer, row_idx_to_prompt
         )
 
-        # group by layer, expert, w_id and save to disk
-        grouped_cache = defaultdict(dict)
-        for key, weight in cache.items():
-            group = f"layer={key.layer_idx:02}/expert={key.expert_id}/w={key.w_id}"
-            tensor_prompt = f"{key.row_id}.{key.prompt}"
-            grouped_cache[group][tensor_prompt] = weight
-        
-        for group, tensors in grouped_cache.items():
-            group_dir: Path = output_dir / group
-            group_dir.mkdir(parents=True, exist_ok=True)
-            file_path = group_dir / f"{batch_id:05}.safetensors"
-            save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
-            print(f"Saved {len(tensors)} tensors to {file_path}")
-        
-        print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
-        cache.clear()
-        assert len(cache) == 0
+        if (batch_id + 1) % SAVE_INTERVAL == 0:
+            # group by layer, expert, w_id and save to disk
+            save_cache_to_disk(output_dir)
+            
+            print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
+            cache.clear()
+            assert len(cache) == 0
