@@ -1,9 +1,9 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 from torch.utils.hooks import RemovableHandle
-# from datasets import load_dataset
+from datasets import load_dataset
 from typing import Dict, List, Set, NamedTuple, Optional
-# from datasets.arrow_dataset import Dataset
+from datasets.arrow_dataset import Dataset
 import json
 from transformers.models.mixtral.modeling_mixtral import MixtralForCausalLM, MoeCausalLMOutputWithPast
 from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
@@ -19,6 +19,7 @@ W_IDS = (1, 3)
 LAYER_IDX = 20
 
 BATCH_SIZE = 3
+N_BATCHES = 10
 
 cache = {}
 row_idx_to_prompt = [None for _ in range(BATCH_SIZE)]
@@ -107,28 +108,13 @@ def patched_sparse_moe_block_forward(self: MixtralSparseMoeBlock, hidden_states:
         return final_hidden_states, router_logits
 
 
-# def get_expert_layer_names(layer_idx: int = LAYER_IDX) -> List[ExpertLayerInfo]:
-#     """Generate list of expert layer names to hook with metadata."""
-#     expert_layer_info = []
-#     for j in range(NUM_EXPERTS):
-#         for k in W_IDS:
-#             layer_path = f"model.layers.{layer_idx}.block_sparse_moe.experts.{j}.w{k}"
-#             expert_metadata = ExpertLayerInfo(
-#                 layer_idx=layer_idx,
-#                 expert_id=j,
-#                 weight_type=k,
-#                 path=layer_path,
-#             )
-#             expert_layer_info.append(expert_metadata)
-#     return expert_layer_info
-
-# def load_wiki_dataset() -> Dataset:
-#     """Load Wikipedia dataset and return it with only title column."""
-#     print("\nLoading Wikipedia dataset...")
-#     ds: Dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train")
-#     ds = ds.remove_columns(["url", "text"])
-#     ds = ds.shuffle(seed=42)
-#     return ds
+def load_wiki_dataset() -> Dataset:
+    """Load Wikipedia dataset and return it with only title column."""
+    print("\nLoading Wikipedia dataset...")
+    ds: Dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train[0:1000]")
+    ds = ds.remove_columns(["url", "text"])
+    ds = ds.shuffle(seed=42)
+    return ds
 
 
 def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
@@ -204,25 +190,17 @@ if __name__ == "__main__":
     # Set padding token
     tokenizer.pad_token = tokenizer.eos_token
     
-    # expert_layer_info = get_expert_layer_names(layer_idx=LAYER_IDX)
-    
     # Load data and run forward pass
-    # ds = load_wiki_dataset()
-    # batch_text = [ds[i]["title"] for i in range(1000)]  # Process 3 samples
-    batch_text = [
-        "Artificial intelligence",
-        "Brown fox",
-        "OpenAI"
-    ]
-
-    for i in range(BATCH_SIZE):
-        row_idx_to_prompt[i] = batch_text[i]
+    ds = load_wiki_dataset()
+    for batch_start in range(0, N_BATCHES * BATCH_SIZE, BATCH_SIZE):
+        for i in range(BATCH_SIZE):
+            prompt = ds[batch_start + i]["title"]
+            row_idx_to_prompt[i] = prompt
 
     output, input_ids, batch_size, last_token_positions = run_forward_pass(
-        model, tokenizer, batch_text
+        model, tokenizer, row_idx_to_prompt
     )
 
     print("\n---- Cached Weights ----")
     print(cache.popitem())
     print(len(cache), "weights cached.")
-
