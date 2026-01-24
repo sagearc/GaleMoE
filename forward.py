@@ -29,7 +29,7 @@ NUM_EXPERTS = 8
 W_IDS = (1, 3)
 LAYERS_TO_PATCH = [4, 16, 28]
 
-BATCH_SIZE = 2000
+BATCH_SIZE = 1000
 N_BATCHES = 100
 
 OUTPUT_DIR = "output"
@@ -42,6 +42,8 @@ def prepare_output_dir(output_dir: str) -> Path:
     output_dir.mkdir()
 
     for layer in LAYERS_TO_PATCH:
+        router_dir: Path = output_dir / f"layer={layer:02}/router"
+        router_dir.mkdir(parents=True)
         for expert in range(NUM_EXPERTS):
             for w_id in W_IDS:
                 group_dir: Path = output_dir / f"layer={layer:02}/expert={expert}/w={w_id}"
@@ -58,7 +60,7 @@ def load_wiki_dataset(seed: int) -> Dataset:
     return ds
 
 
-def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
+def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text) -> tuple[MoeCausalLMOutputWithPast, torch.Tensor]:
     """Tokenize input, run forward pass, and track expert activations."""
     # Tokenize the input
     inputs = tokenizer(batch_text, return_tensors="pt", truncation=True, max_length=32, padding=True)
@@ -67,8 +69,8 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     
     # Forward pass (no gradients needed)
     with torch.no_grad():
-        output: MoeCausalLMOutputWithPast = model(input_ids=input_ids, attention_mask=attention_mask, output_router_logits=False)
-    
+        output: MoeCausalLMOutputWithPast = model(input_ids=input_ids, attention_mask=attention_mask, output_router_logits=True)    
+
     return output, input_ids
 
 
@@ -85,6 +87,17 @@ def save_cache_to_disk(output_dir: Path, cache: dict[CacheKey, torch.Tensor], ba
         file_path = group_dir / f"{batch_id:05}.safetensors"
         save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
 
+def save_router_logits_to_disk(router_logits: tuple[torch.FloatTensor], output_dir: Path, batch, batch_id: int, batch_size: int, seq_length: int):
+    """Save router logits for each layer to disk."""
+    for layer_idx in LAYERS_TO_PATCH:
+        file_path = output_dir / f"layer={layer_idx:02}/router/{batch_id:05}.safetensors"
+        logits = router_logits[layer_idx]  # (batch_size * sequence_length, n_experts)
+        logits = logits.view(batch_size, seq_length, NUM_EXPERTS)  # reshape to (batch_size, sequence_length, n_experts)
+        tensors = {}
+        for i, (row_id, prompt) in enumerate(zip(batch["id"], batch["title"])):
+            tensor_name = f"{row_id}.{prompt}"
+            tensors[tensor_name] = logits[i].cpu()
+        save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
 
 def patch_loop(model: MixtralForCausalLM, loop: tqdm):
     """Patch the loop into each MixtralSparseMoeBlock for progress tracking."""
@@ -155,11 +168,18 @@ if __name__ == "__main__":
         for i, (row_id, prompt) in enumerate(zip(batch["id"], batch["title"])):
             row_idx_to_prompt[i] = (row_id, prompt)
 
-        output, input_ids = run_forward_pass(model, tokenizer, row_idx_to_prompt)
+        output, input_ids = run_forward_pass(model, tokenizer, batch["title"])
+        batch_size, seq_length = input_ids.shape
 
         loop.set_description(f"Saving batch to disk")
         # group by layer, expert, w_id and save to disk
         save_cache_to_disk(output_dir, cache, batch_id)
+        save_router_logits_to_disk(router_logits=output.router_logits,
+                                   output_dir=output_dir,
+                                   batch=batch,
+                                   batch_id=batch_id,
+                                   batch_size=batch_size,
+                                   seq_length=seq_length)
 
         print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
         cache.clear()
