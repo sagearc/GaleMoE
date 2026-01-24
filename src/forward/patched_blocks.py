@@ -1,13 +1,14 @@
+from typing import NamedTuple
+
 import torch
 import torch.nn.functional as F
 from transformers.models.mixtral.modeling_mixtral import (
     MixtralBlockSparseTop2MLP,
     MixtralSparseMoeBlock,
 )
-from typing import NamedTuple
 
 
-class Key(NamedTuple):
+class CacheKey(NamedTuple):
     layer_idx: int
     expert_id: int
     w_id: int
@@ -31,7 +32,7 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
         prompt_idx = (top_x[i] // sequence_length).item()
         row_id_in_dataset, prompt = self.patch_row_idx_to_prompt[prompt_idx]
 
-        key1 = Key(
+        key1 = CacheKey(
             layer_idx=self.patch_layer_idx,
             expert_id=self.patch_expert_id,
             w_id=1,
@@ -40,7 +41,7 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
         )
         self.patch_cache[key1] = W1x[i].cpu()
 
-        key3 = Key(
+        key3 = CacheKey(
             layer_idx=self.patch_layer_idx,
             expert_id=self.patch_expert_id,
             w_id=3,
