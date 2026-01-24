@@ -29,6 +29,7 @@ class Key(NamedTuple):
     expert_id: int
     w_id: int
     prompt: int
+    row_id: int
 
 # Monkey-patched MixtralBlockSparseTop2MLP.forward method
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
@@ -44,13 +45,14 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
     # save to cache
     for i in is_last_indices:
         prompt_idx = (top_x[i] // sequence_length).item()
-        prompt = row_idx_to_prompt[prompt_idx]
+        row_id_in_dataset, prompt = row_idx_to_prompt[prompt_idx]
 
         key1 = Key(
             layer_idx=self.galemoe_layer_idx,
             expert_id=self.galemoe_expert_id,
             w_id=1,
             prompt=prompt,
+            row_id=row_id_in_dataset,
         )
         cache[key1] = W1x[i].cpu()
 
@@ -59,6 +61,7 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
             expert_id=self.galemoe_expert_id,
             w_id=3,
             prompt=prompt,
+            row_id=row_id_in_dataset,
         )
         cache[key3] = W3x[i].cpu()
 
@@ -111,7 +114,7 @@ def patched_sparse_moe_block_forward(self: MixtralSparseMoeBlock, hidden_states:
 def load_wiki_dataset() -> Dataset:
     """Load Wikipedia dataset and return it with only title column."""
     print("\nLoading Wikipedia dataset...")
-    ds: Dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train[0:1000]")
+    ds: Dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
     ds = ds.remove_columns(["url", "text"])
     ds = ds.shuffle(seed=42)
     return ds
@@ -126,48 +129,31 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     
     batch_size, seq_len = input_ids.shape
     print("\n---- Forward Pass ----")
-    print(f"INPUT IDS:\n{input_ids}\n")
-    print(f"\nInput shape: {input_ids.shape}")
+    print(f"INPUT IDS:\n{input_ids}")
+    print(f"\nInput shape: {input_ids.shape}\n")
     print(f"Batch texts: {batch_text}")
-    
-    # Find actual last token position for each batch item (ignoring padding)
-    last_token_positions = (attention_mask.sum(dim=1) - 1).cpu().tolist()
-    print(f"Last token positions (non-padded): {last_token_positions}")
     
     # Forward pass (no gradients needed)
     with torch.no_grad():
-        output: MoeCausalLMOutputWithPast = model(input_ids=input_ids, attention_mask=attention_mask, output_router_logits=True)
-        # print router logits if needed
-        print(f"Router logits captured during forward pass.")
-        print(f"Output logits shape: {len(output.router_logits)} layers") 
-        print(f"Output logits shape (layer 0): {output.router_logits[LAYER_IDX].shape}")
-        curr_layer_logits = output.router_logits[LAYER_IDX]  # Shape: [batch_size, seq_len, num_experts]
-        # How many tokens were routed to each expert by top 2 for each token
-        top2_experts = curr_layer_logits.topk(2, dim=-1).indices
-        expert_token_counts = top2_experts.flatten().bincount(minlength=NUM_EXPERTS)
-        print(f"Token counts per expert at layer {LAYER_IDX}: {expert_token_counts.tolist()}")
-
-        
-    
-    # Log which experts were activated
-    print(f"\n{'='*80}")
-    print(f"EXPERTS ACTIVATED (Layer {LAYER_IDX})")
-    print(f"{'='*80}\n")
+        output: MoeCausalLMOutputWithPast = model(input_ids=input_ids, attention_mask=attention_mask, output_router_logits=False)
     
     return output, input_ids, batch_size, last_token_positions
 
 
 
 if __name__ == "__main__":
-    model = MixtralForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", dtype=torch.bfloat16)
-    tokenizer = LlamaTokenizerFast.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
 
-    config = model.config
+    model = MixtralForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", dtype=torch.bfloat16)
+    model.eval()
+
+    tokenizer = LlamaTokenizerFast.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
+    tokenizer.pad_token = tokenizer.eos_token
     
     named_modules = dict(model.named_modules())
 
     print("Patching MixtralSparseMoeBlock and MixtralBlockSparseTop2MLP forward methods...")
-    for layer_idx in [0, 1, LAYER_IDX]:
+    layers_to_patch = [0, 1, LAYER_IDX]
+    for layer_idx in layers_to_patch:
         layer_path = f"model.layers.{layer_idx}.block_sparse_moe"
         module = named_modules[layer_path]
         assert isinstance(module, MixtralSparseMoeBlock)
@@ -180,27 +166,19 @@ if __name__ == "__main__":
             assert isinstance(module, MixtralBlockSparseTop2MLP)
             module.forward = types.MethodType(patched_block_sparse_top2_mlp_forward, module)
             module.galemoe_expert_id = expert
-            module.galemoe_layer_idx = layer_idx
+            module.galemoe_layer_idx = layer_idx    
 
 
-
-    # Set model to evaluation mode
-    model.eval()
-    
-    # Set padding token
-    tokenizer.pad_token = tokenizer.eos_token
-    
-    # Load data and run forward pass
     ds = load_wiki_dataset()
-    for batch_start in range(0, N_BATCHES * BATCH_SIZE, BATCH_SIZE):
-        for i in range(BATCH_SIZE):
-            prompt = ds[batch_start + i]["title"]
-            row_idx_to_prompt[i] = prompt
+    for batch in ds.iter(BATCH_SIZE):
+        for i, (row_id, prompt) in enumerate(zip(batch["id"], batch["title"])):
+            print(i)
+            row_idx_to_prompt[i] = (row_id, prompt)
 
-    output, input_ids, batch_size, last_token_positions = run_forward_pass(
-        model, tokenizer, row_idx_to_prompt
-    )
+        output, input_ids, batch_size, last_token_positions = run_forward_pass(
+            model, tokenizer, row_idx_to_prompt
+        )
 
-    print("\n---- Cached Weights ----")
-    print(cache.popitem())
-    print(len(cache), "weights cached.")
+        print("\n---- Cached Weights ----")
+        print(cache.popitem())
+        print(len(cache), "weights cached.")
