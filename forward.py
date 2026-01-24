@@ -1,6 +1,7 @@
 import types
 from collections import defaultdict
 from pathlib import Path
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ from safetensors.torch import save_file
 from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
 from transformers.models.mixtral.modeling_mixtral import (
     MixtralBlockSparseTop2MLP,
+    MixtralAttention,
     MixtralForCausalLM,
     MixtralSparseMoeBlock,
     MoeCausalLMOutputWithPast,
@@ -69,6 +71,7 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     
     return output, input_ids
 
+
 def save_cache_to_disk(output_dir: Path):
     """Save cached tensors to disk."""
     grouped_cache = defaultdict(dict)
@@ -84,6 +87,19 @@ def save_cache_to_disk(output_dir: Path):
         print(f"Saved {len(tensors)} tensors to {file_path}")
 
 
+def patch_loop(model: MixtralForCausalLM, loop: tqdm):
+    """Patch the loop into each MixtralSparseMoeBlock for progress tracking."""
+    def hook(module, input, layer_idx):
+        loop.set_description(f"Forward pass [layer {1 + layer_idx:02}/32]")
+
+    named_modules = dict(model.named_modules())
+    for layer_idx in range(model.config.num_hidden_layers):
+        layer_path = f"model.layers.{layer_idx}.self_attn"
+        module = named_modules[layer_path]
+        assert isinstance(module, MixtralAttention)
+        h = partial(hook, layer_idx=layer_idx)
+        module.register_forward_pre_hook(h)
+
 if __name__ == "__main__":
     output_dir = prepare_output_dir(OUTPUT_DIR)
     
@@ -92,7 +108,6 @@ if __name__ == "__main__":
 
     tokenizer = LlamaTokenizerFast.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
     tokenizer.pad_token = tokenizer.eos_token
-
 
     print(f"Using device: {model.device}")
     print(f"Number of experts: {NUM_EXPERTS}")
@@ -104,6 +119,9 @@ if __name__ == "__main__":
     print(f"Wikipedia seed: {WIKI_SEED}")
     print()
 
+    ds = load_wiki_dataset(seed=WIKI_SEED)
+    loop = tqdm(ds.iter(BATCH_SIZE), total=N_BATCHES)
+    patch_loop(model, loop)
 
     cache: dict[CacheKey, torch.Tensor] = {}
     row_idx_to_prompt = [None for _ in range(BATCH_SIZE)]
@@ -127,10 +145,7 @@ if __name__ == "__main__":
             module.patch_cache = cache
             module.patch_row_idx_to_prompt = row_idx_to_prompt
 
-
     ds = load_wiki_dataset(seed=WIKI_SEED)
-    loop = tqdm(ds.iter(BATCH_SIZE), total=N_BATCHES)
-    loop.set_description("Forward pass")
     for batch_id, batch in  enumerate(loop):
         if batch_id >= N_BATCHES:
             break

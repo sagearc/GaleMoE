@@ -21,8 +21,6 @@ class CacheKey(NamedTuple):
 # Monkey-patched MixtralBlockSparseTop2MLP.forward method
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
     """ """
-    print(f"Expert {self.patch_expert_id} - Top-x indices: {top_x}")
-
     W1x: torch.Tensor = self.w1(hidden_states)
     W3x: torch.Tensor = self.w3(hidden_states)
 
