@@ -18,13 +18,16 @@ NUM_EXPERTS = 8
 W_IDS = (1, 3)
 LAYER_IDX = 20
 
+BATCH_SIZE = 3
+
 cache = {}
+row_idx_to_prompt = [None for _ in range(BATCH_SIZE)]
 
 class Key(NamedTuple):
     layer_idx: int
     expert_id: int
     w_id: int
-    row_idx: int
+    prompt: int
 
 # Monkey-patched MixtralBlockSparseTop2MLP.forward method
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
@@ -40,12 +43,13 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
     # save to cache
     for i in is_last_indices:
         prompt_idx = (top_x[i] // sequence_length).item()
+        prompt = row_idx_to_prompt[prompt_idx]
 
         key1 = Key(
             layer_idx=self.galemoe_layer_idx,
             expert_id=self.galemoe_expert_id,
             w_id=1,
-            row_idx=prompt_idx,
+            prompt=prompt,
         )
         cache[key1] = W1x[i].cpu()
 
@@ -53,7 +57,7 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
             layer_idx=self.galemoe_layer_idx,
             expert_id=self.galemoe_expert_id,
             w_id=3,
-            row_idx=prompt_idx,
+            prompt=prompt,
         )
         cache[key3] = W3x[i].cpu()
 
@@ -193,7 +197,7 @@ if __name__ == "__main__":
             module.galemoe_layer_idx = layer_idx
 
 
-    
+
     # Set model to evaluation mode
     model.eval()
     
