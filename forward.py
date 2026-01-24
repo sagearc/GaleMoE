@@ -1,17 +1,16 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
-from torch.utils.hooks import RemovableHandle
 from datasets import load_dataset
-from typing import Dict, List, Set, NamedTuple, Optional
+from typing import NamedTuple
 from datasets.arrow_dataset import Dataset
-import json
 from transformers.models.mixtral.modeling_mixtral import MixtralForCausalLM, MoeCausalLMOutputWithPast
 from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
 from transformers.models.mixtral.modeling_mixtral import MixtralBlockSparseTop2MLP, MixtralSparseMoeBlock
-import numpy as np
-import torch.nn as nn
+
 import torch.nn.functional as F
 import types
+from collections import defaultdict
+from safetensors.torch import save_file
+from pathlib import Path
 
 
 NUM_EXPERTS = 8
@@ -21,8 +20,8 @@ LAYER_IDX = 20
 BATCH_SIZE = 3
 N_BATCHES = 10
 
-cache = {}
-row_idx_to_prompt = [None for _ in range(BATCH_SIZE)]
+OUTPUT_DIR = "output"
+WIKI_SEED = 42
 
 class Key(NamedTuple):
     layer_idx: int
@@ -30,6 +29,11 @@ class Key(NamedTuple):
     w_id: int
     prompt: int
     row_id: int
+
+
+cache: dict[Key, torch.Tensor] = {}
+row_idx_to_prompt = [None for _ in range(BATCH_SIZE)]
+
 
 # Monkey-patched MixtralBlockSparseTop2MLP.forward method
 def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidden_states: torch.Tensor, top_x: torch.Tensor, sequence_length: int):
@@ -111,12 +115,12 @@ def patched_sparse_moe_block_forward(self: MixtralSparseMoeBlock, hidden_states:
         return final_hidden_states, router_logits
 
 
-def load_wiki_dataset() -> Dataset:
+def load_wiki_dataset(seed: int) -> Dataset:
     """Load Wikipedia dataset and return it with only title column."""
     print("\nLoading Wikipedia dataset...")
     ds: Dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
     ds = ds.remove_columns(["url", "text"])
-    ds = ds.shuffle(seed=42)
+    ds = ds.shuffle(seed=seed)
     return ds
 
 
@@ -127,7 +131,6 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     input_ids = inputs["input_ids"].to(model.device)
     attention_mask = inputs["attention_mask"].to(model.device)
     
-    batch_size, seq_len = input_ids.shape
     print("\n---- Forward Pass ----")
     print(f"INPUT IDS:\n{input_ids}")
     print(f"\nInput shape: {input_ids.shape}\n")
@@ -137,11 +140,13 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     with torch.no_grad():
         output: MoeCausalLMOutputWithPast = model(input_ids=input_ids, attention_mask=attention_mask, output_router_logits=False)
     
-    return output, input_ids, batch_size, last_token_positions
+    return output, input_ids
 
 
 
 if __name__ == "__main__":
+    output_dir = Path(OUTPUT_DIR)
+    output_dir.mkdir(exist_ok=True)
 
     model = MixtralForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", dtype=torch.bfloat16)
     model.eval()
@@ -168,15 +173,33 @@ if __name__ == "__main__":
             module.galemoe_expert_id = expert
             module.galemoe_layer_idx = layer_idx    
 
+    ds = load_wiki_dataset(seed=WIKI_SEED)
+    for batch_id, batch in enumerate(ds.iter(BATCH_SIZE)):
+        if batch_id >= N_BATCHES:
+            break
 
-    ds = load_wiki_dataset()
-    for batch in ds.iter(BATCH_SIZE):
+        print(f"\n=== Processing batch {batch_id} ===")
         for i, (row_id, prompt) in enumerate(zip(batch["id"], batch["title"])):
             row_idx_to_prompt[i] = (row_id, prompt)
 
-        output, input_ids, batch_size, last_token_positions = run_forward_pass(
+        output, input_ids = run_forward_pass(
             model, tokenizer, row_idx_to_prompt
         )
+
+        # group by layer, expert, w_id and save to disk
+
+        grouped_cache = defaultdict(dict)
+        for key, weight in cache.items():
+            group = f"layer={key.layer_idx:02}/expert={key.expert_id}/w={key.w_id}"
+            tensor_prompt = f"{key.row_id}.{key.prompt}"
+            grouped_cache[group][tensor_prompt] = weight
+        
+        for group, tensors in grouped_cache.items():
+            group_dir: Path = output_dir / group
+            group_dir.mkdir(parents=True, exist_ok=True)
+            file_path = group_dir / f"{batch_id:05}.safetensors"
+            save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
+            print(f"Saved {len(tensors)} tensors to {file_path}")
 
         print("\n---- Cached Weights ----")
         print(cache.popitem())
