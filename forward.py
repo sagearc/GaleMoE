@@ -71,7 +71,7 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     return output, input_ids
 
 
-def save_cache_to_disk(output_dir: Path):
+def save_cache_to_disk(output_dir: Path, cache: dict[CacheKey, torch.Tensor], batch_id: int):
     """Save cached tensors to disk."""
     grouped_cache = defaultdict(dict)
     for key, weight in cache.items():
@@ -153,7 +153,7 @@ if __name__ == "__main__":
 
         loop.set_description(f"Saving batch to disk")
         # group by layer, expert, w_id and save to disk
-        save_cache_to_disk(output_dir)
+        save_cache_to_disk(output_dir, cache, batch_id)
 
         print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
         cache.clear()
