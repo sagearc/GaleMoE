@@ -87,6 +87,7 @@ def save_cache_to_disk(output_dir: Path, cache: dict[CacheKey, torch.Tensor], ba
         file_path = group_dir / f"{batch_id:05}.safetensors"
         save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
 
+
 def save_router_logits_to_disk(router_logits: tuple[torch.FloatTensor], output_dir: Path, batch, batch_id: int, batch_size: int, seq_length: int):
     """Save router logits for each layer to disk."""
     for layer_idx in LAYERS_TO_PATCH:
@@ -98,6 +99,7 @@ def save_router_logits_to_disk(router_logits: tuple[torch.FloatTensor], output_d
             tensor_name = f"{row_id}.{prompt}"
             tensors[tensor_name] = logits[i].cpu()
         save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
+
 
 def patch_loop(model: MixtralForCausalLM, loop: tqdm):
     """Patch the loop into each MixtralSparseMoeBlock for progress tracking."""
@@ -111,6 +113,15 @@ def patch_loop(model: MixtralForCausalLM, loop: tqdm):
         assert isinstance(module, MixtralAttention)
         h = partial(hook, layer_idx=layer_idx)
         module.register_forward_pre_hook(h)
+
+
+def free_memory(activations_cache: dict[CacheKey, torch.Tensor]):
+    """Free up unused memory."""
+    for v in activations_cache.values():
+        del v
+    activations_cache.clear()
+    torch.cuda.empty_cache()
+
 
 if __name__ == "__main__":
     output_dir = prepare_output_dir(OUTPUT_DIR)
@@ -182,7 +193,9 @@ if __name__ == "__main__":
                                    seq_length=seq_length)
 
         print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
-        cache.clear()
-        assert len(cache) == 0
+
+        del output
+        del input_ids
+        free_memory(cache)
 
         loop.set_description("Forward pass")
