@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
 from safetensors.torch import save_file
+from transformers import BitsAndBytesConfig
 from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
 from transformers.models.mixtral.modeling_mixtral import (
     MixtralBlockSparseTop2MLP,
@@ -28,7 +29,7 @@ NUM_EXPERTS = 8
 W_IDS = (1, 3)
 LAYERS_TO_PATCH = [4, 16, 28]
 
-BATCH_SIZE = 1000
+BATCH_SIZE = 10000
 N_BATCHES = 100
 
 OUTPUT_DIR = "output"
@@ -101,7 +102,12 @@ def patch_loop(model: MixtralForCausalLM, loop: tqdm):
 if __name__ == "__main__":
     output_dir = prepare_output_dir(OUTPUT_DIR)
     
-    model = MixtralForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", dtype=torch.bfloat16)
+    quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+    model = MixtralForCausalLM.from_pretrained(
+        "mistralai/Mixtral-8x7B-v0.1",
+        quantization_config=quantization_config,
+        device_map="auto")
+
     model.eval()
 
     tokenizer = LlamaTokenizerFast.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
