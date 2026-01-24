@@ -1,3 +1,5 @@
+# ruff: noqa
+"""Monkey-patched forward methods for Mixtral sparse MoE blocks."""
 from typing import NamedTuple
 
 import torch
