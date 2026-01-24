@@ -14,6 +14,7 @@ from transformers.models.mixtral.modeling_mixtral import (
     MixtralSparseMoeBlock,
     MoeCausalLMOutputWithPast,
 )
+from tqdm import tqdm
 
 from src.forward.patched_blocks import (
     CacheKey,
@@ -25,8 +26,8 @@ NUM_EXPERTS = 8
 W_IDS = (1, 3)
 LAYERS_TO_PATCH = [0, 1, 20]
 
-BATCH_SIZE = 3
-N_BATCHES = 10
+BATCH_SIZE = 1000
+N_BATCHES = 100
 SAVE_INTERVAL = 10
 
 OUTPUT_DIR = "output"
@@ -62,11 +63,6 @@ def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text):
     input_ids = inputs["input_ids"].to(model.device)
     attention_mask = inputs["attention_mask"].to(model.device)
     
-    print("\n---- Forward Pass ----")
-    print(f"INPUT IDS:\n{input_ids}")
-    print(f"\nInput shape: {input_ids.shape}\n")
-    print(f"Batch texts: {batch_text}")
-    
     # Forward pass (no gradients needed)
     with torch.no_grad():
         output: MoeCausalLMOutputWithPast = model(input_ids=input_ids, attention_mask=attention_mask, output_router_logits=False)
@@ -96,7 +92,19 @@ if __name__ == "__main__":
 
     tokenizer = LlamaTokenizerFast.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
     tokenizer.pad_token = tokenizer.eos_token
-    
+
+
+    print(f"Using device: {model.device}")
+    print(f"Number of experts: {NUM_EXPERTS}")
+    print(f"Layers to patch: {LAYERS_TO_PATCH}")
+    print(f"Batch size: {BATCH_SIZE}")
+    print(f"Number of batches: {N_BATCHES}")
+    print(f"Save interval: {SAVE_INTERVAL}")
+    print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Wikipedia seed: {WIKI_SEED}")
+    print()
+
+
     cache: dict[CacheKey, torch.Tensor] = {}
     row_idx_to_prompt = [None for _ in range(BATCH_SIZE)]
     named_modules = dict(model.named_modules())
@@ -121,22 +129,24 @@ if __name__ == "__main__":
 
 
     ds = load_wiki_dataset(seed=WIKI_SEED)
-    for batch_id, batch in enumerate(ds.iter(BATCH_SIZE)):
+    loop = tqdm(ds.iter(BATCH_SIZE), total=N_BATCHES)
+    loop.set_description("Forward pass")
+    for batch_id, batch in  enumerate(loop):
         if batch_id >= N_BATCHES:
             break
 
-        print(f"\n=== Processing batch {batch_id} ===")
         for i, (row_id, prompt) in enumerate(zip(batch["id"], batch["title"])):
             row_idx_to_prompt[i] = (row_id, prompt)
 
-        output, input_ids = run_forward_pass(
-            model, tokenizer, row_idx_to_prompt
-        )
+        output, input_ids = run_forward_pass(model, tokenizer, row_idx_to_prompt)
 
         if (batch_id + 1) % SAVE_INTERVAL == 0:
+            loop.set_description(f"Saving batch to disk")
             # group by layer, expert, w_id and save to disk
             save_cache_to_disk(output_dir)
             
             print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
             cache.clear()
             assert len(cache) == 0
+
+            loop.set_description("Forward pass")
