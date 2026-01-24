@@ -30,4 +30,3 @@ exclude = [
 
 [tool.ruff.lint]
 extend-select = ["I"]
-
