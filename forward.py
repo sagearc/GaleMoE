@@ -1,17 +1,20 @@
-import torch
-from datasets import load_dataset
-from typing import NamedTuple
-from datasets.arrow_dataset import Dataset
-from transformers.models.mixtral.modeling_mixtral import MixtralForCausalLM, MoeCausalLMOutputWithPast
-from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
-from transformers.models.mixtral.modeling_mixtral import MixtralBlockSparseTop2MLP, MixtralSparseMoeBlock
-
-import torch.nn.functional as F
 import types
 from collections import defaultdict
-from safetensors.torch import save_file
 from pathlib import Path
+from typing import NamedTuple
 
+import torch
+import torch.nn.functional as F
+from datasets import load_dataset
+from datasets.arrow_dataset import Dataset
+from safetensors.torch import save_file
+from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
+from transformers.models.mixtral.modeling_mixtral import (
+    MixtralBlockSparseTop2MLP,
+    MixtralForCausalLM,
+    MixtralSparseMoeBlock,
+    MoeCausalLMOutputWithPast,
+)
 
 NUM_EXPERTS = 8
 W_IDS = (1, 3)

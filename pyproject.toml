@@ -21,3 +21,6 @@ dependencies = [
     "torchvision>=0.24.1",
     "transformers>=4.57.3",
 ]
+
+[tool.ruff.lint]
+extend-select = ["I"]
