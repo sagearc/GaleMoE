@@ -38,7 +38,7 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
     W3x: torch.Tensor = self.w3(hidden_states)
 
     is_last = ((top_x + 1) % sequence_length) == 0
-    is_last_indices = torch.nonzero(is_last).squeeze()
+    is_last_indices = torch.nonzero(is_last).squeeze(-1)
 
     # save to cache
     for i in is_last_indices:
@@ -214,6 +214,10 @@ if __name__ == "__main__":
         "Brown fox",
         "OpenAI"
     ]
+
+    for i in range(BATCH_SIZE):
+        row_idx_to_prompt[i] = batch_text[i]
+
     output, input_ids, batch_size, last_token_positions = run_forward_pass(
         model, tokenizer, batch_text
     )
