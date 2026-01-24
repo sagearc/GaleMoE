@@ -31,34 +31,31 @@ def patched_block_sparse_top2_mlp_forward(self: MixtralBlockSparseTop2MLP, hidde
     """ """
     print(f"Expert {self.galemoe_expert_id} - Top-x indices: {top_x}")
 
-    W1x = self.w1(hidden_states)
-    W3x = self.w3(hidden_states)
+    W1x: torch.Tensor = self.w1(hidden_states)
+    W3x: torch.Tensor = self.w3(hidden_states)
 
     is_last = ((top_x + 1) % sequence_length) == 0
-    row_ids = top_x // sequence_length
-    row_ids_of_last = row_ids[is_last]
-    print("shapes:", W1x.shape, W3x.shape)
-    print(f"Expert {self.galemoe_expert_id} - Row IDs of last tokens in sequence: {row_ids_of_last}")
-    values_of_last = W1x[is_last]
-    print(f"Expert {self.galemoe_expert_id} - Values of W1x for last tokens in sequence: {values_of_last.shape}")
+    is_last_indices = torch.nonzero(is_last).squeeze()
 
     # save to cache
-    for row_idx in row_ids_of_last.tolist():
+    for i in is_last_indices:
+        prompt_idx = (top_x[i] // sequence_length).item()
+
         key1 = Key(
             layer_idx=self.galemoe_layer_idx,
             expert_id=self.galemoe_expert_id,
             w_id=1,
-            row_idx=row_idx,
+            row_idx=prompt_idx,
         )
-        cache[key1] = W1x[].cpu()
+        cache[key1] = W1x[i].cpu()
 
         key3 = Key(
             layer_idx=self.galemoe_layer_idx,
             expert_id=self.galemoe_expert_id,
             w_id=3,
-            row_idx=row_idx,
+            row_idx=prompt_idx,
         )
-        cache[key3] = W3x.cpu()
+        cache[key3] = W3x[i].cpu()
 
     current_hidden_states = self.act_fn(W1x) * W3x
     current_hidden_states = self.w2(current_hidden_states)
