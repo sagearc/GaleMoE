@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..core import (
     ExperimentConfig,
     BatchLoader,
     LossEvaluator,
+    ModelLoader,
     RouterManager,
     ExpertVectors,
     VectorIntervention,
@@ -115,13 +115,10 @@ def run_vector_intervention_experiment(
     Results keys are ``{variant}_{intervention}`` e.g. ``svd_inject``, ``orthogonal_subtract``.
     ``confusion_top_k`` controls the size of the saved confusion matrix (default 2, Mixtral's expert top-k).
     """
-    tokenizer = AutoTokenizer.from_pretrained(config.model_id)
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model_id,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=False,
-    )
+    # Load model and tokenizer using unified loader
+    loader = ModelLoader(config)
+    tokenizer = loader.load_tokenizer()
+    model = loader.load_model()
 
     if batch_loader is not None:
         data_loader = batch_loader

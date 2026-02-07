@@ -28,3 +28,6 @@ class ExperimentConfig:
     text_file: str | None = None
     top_k: Sequence[int] = (1,)
     use_single_device: bool = False  # If True, load with device_map=None to avoid meta tensors
+    target_layer_only_gpu: bool = False  # If True, put only layer_idx on GPU, rest on CPU
+    num_layers: int = 32  # Total layers in model (for device_map building)
+    quantization: str | None = None  # None, "8bit", or "4bit" for memory reduction

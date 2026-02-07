@@ -3,6 +3,7 @@
 Project the SVD (or orthogonal/random) direction out of each expert's router row,
 then measure loss and delta vs baseline. No inject/subtract, no token distribution metrics.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,7 +22,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Experiment 1: Project out SVDs from all experts, compare loss and delta.",
     )
-    parser.add_argument("--svd_dir", type=str, required=True, help="Directory with expert SVD pickle files")
+    parser.add_argument(
+        "--svd_dir",
+        type=str,
+        required=True,
+        help="Directory with expert SVD pickle files",
+    )
     parser.add_argument("--layer_idx", type=int, required=True, help="MoE layer index")
     parser.add_argument("--output_file", type=str, default="results_project_out.json")
     parser.add_argument("--num_samples", type=int, default=200)
@@ -62,6 +68,24 @@ def main() -> None:
         action="store_true",
         help="Load model on a single GPU (no device_map). Use if you get 'meta tensor' errors; requires model to fit on one device.",
     )
+    parser.add_argument(
+        "--target-layer-only-gpu",
+        action="store_true",
+        help="Put only the target layer (layer_idx) on GPU, rest on CPU. Saves GPU memory but forward passes are slower.",
+    )
+    parser.add_argument(
+        "--num-layers",
+        type=int,
+        default=32,
+        help="Total number of layers in model (for device_map building). Default: 32 (Mixtral).",
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=[None, "8bit", "4bit"],
+        help="Quantization: None (bf16, default), 8bit (~4x memory reduction), or 4bit (~8x reduction). May affect accuracy.",
+    )
 
     args = parser.parse_args()
 
@@ -89,6 +113,9 @@ def main() -> None:
         text_file=args.text_file,
         top_k=top_k,
         use_single_device=args.use_single_device,
+        target_layer_only_gpu=args.target_layer_only_gpu,
+        num_layers=args.num_layers,
+        quantization=args.quantization,
     )
 
     run_project_out_experiment(cfg)

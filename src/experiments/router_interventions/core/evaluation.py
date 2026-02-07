@@ -16,11 +16,16 @@ class LossEvaluator:
 
     @torch.no_grad()
     def evaluate(self, batches: List[torch.Tensor]) -> float:
-        """Return mean loss over the given batches."""
+        """Return mean loss over the given batches.
+        
+        Batches may be on CPU or GPU. Moves to device as needed.
+        """
         self.model.eval()
         losses: List[float] = []
         for batch in batches:
-            batch = batch.to(self._device)
+            # Move to device if needed (handles both pre-moved and lazy cases)
+            if batch.device != self._device:
+                batch = batch.to(self._device)
             out = self.model(input_ids=batch, labels=batch)
             losses.append(out.loss.item())
         return sum(losses) / len(losses) if losses else 0.0
