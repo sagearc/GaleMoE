@@ -1,0 +1,121 @@
+% ============================================================
+%  MAIN BODY
+% ============================================================
+
+\subsection{Router--Expert Alignment Analysis}
+
+In MoE architectures the router decides which expert processes each token, yet it is unclear whether the learned router vectors bear any structural relationship to the weight matrices of the experts they select. We investigate this question by measuring how much of each router vector's energy falls within the principal input subspace of its assigned expert.
+
+\subsubsection{Method}
+
+We analyze Mixtral-8x7B-v0.1~\cite{jiang2024mixtral} (32 layers, 8 experts per layer, $d{=}4096$). For each expert $i$ we compute the SVD of its input weight matrix $W_i = U_i \Sigma_i V_i^\top$ and define the \textbf{projection energy} of the normalized router vector $\hat{\mathbf{r}}_i$ onto the top-$k$ right singular subspace:
+\begin{equation}
+    E_i(k) = \| V_{i,k}^\top \hat{\mathbf{r}}_i \|^2, \quad \hat{\mathbf{r}}_i = \frac{\mathbf{r}_i}{\|\mathbf{r}_i\|}
+\end{equation}
+where $V_{i,k} \in \mathbb{R}^{d \times k}$ contains the first $k$ columns of $V_i$. We evaluate $E(k)$ for $k \in \{1, 2, 4, \ldots, 4096\}$ (13 geometrically spaced values) across all 32 layers and 256 router--expert pairs. To assess significance we use a permutation test: for each $k$ we randomly permute the router--expert assignments 200 times, yielding a null distribution with mean $\mu_{\text{shuffle}}$ and standard deviation $\sigma_{\text{shuffle}}$, and compute $z = (E(k) - \mu_{\text{shuffle}}) / \sigma_{\text{shuffle}}$.
+
+\subsubsection{Results}
+
+Across all layers (except layer~0; see Appendix~\ref{app:alignment}), the true router--expert pairing produces alignment consistently $2$--$2.5$ standard deviations above the permuted baseline, with $z$-scores averaging $2.14$. The excess alignment $\Delta = E(k) - \mu_{\text{shuffle}}$ peaks at $k{=}512$ ($\Delta = 0.219$), indicating that the alignment is distributed across a moderate-dimensional subspace ($\sim$64--512 singular directions) rather than concentrated in a single dominant direction. At $k{=}1$ the mean $\cos^2\theta$ with the leading singular vector is modest ($0.065$ on average) but varies with depth, reaching $0.10$--$0.15$ in layers~22--26.
+
+These results show that router vectors become structurally aligned with the principal input subspaces of their assigned experts during training---the router learns to send tokens along directions to which the expert is most sensitive. This coupling is not explained by the non-isotropic structure of the weight matrices alone, which the shuffle baseline controls for.
+
+
+% ============================================================
+%  APPENDIX
+% ============================================================
+% Place the content below inside your appendix environment,
+% e.g. after \appendix or inside \begin{appendices}...\end{appendices}
+
+\subsection{Alignment Analysis: Extended Details}
+\label{app:alignment}
+
+\subsubsection{Experimental Details}
+
+Each expert's input weight matrix $W_i \in \mathbb{R}^{14336 \times 4096}$ maps from the hidden dimension to the feed-forward dimension. The router weight matrix $G \in \mathbb{R}^{8 \times 4096}$ contains one row per expert. SVD decompositions were computed in float32 on CPU and cached to disk for reuse. The permutation test uses 200 random shuffles with a fixed seed for reproducibility.
+
+\subsubsection{Shuffle Baseline vs.\ Theoretical Random Expectation}
+
+For a uniformly random unit vector in $\mathbb{R}^d$, the expected projection energy onto a $k$-dimensional subspace is $k/d$. However, the empirical shuffle baseline $\mu_{\text{shuffle}}$ substantially exceeds this value (Table~\ref{tab:shuffle_baseline}). This discrepancy arises because expert weight matrices have non-uniform singular value distributions---their energy is concentrated in fewer directions than a random matrix would predict. Even with mismatched (shuffled) router--expert pairs, this structure inflates the projection energy. The shuffle baseline is therefore the appropriate null model, and our reported $z$-scores and $\Delta$ values are computed against it.
+
+\begin{table}[h]
+\centering
+\caption{Shuffle baseline $\mu_{\text{shuffle}}$ vs.\ theoretical random expectation $k/d$ (averaged over all layers and experts).}
+\label{tab:shuffle_baseline}
+\small
+\begin{tabular}{r r r r}
+\toprule
+$k$ & $k/d$ & $\mu_{\text{shuffle}}$ & Ratio \\
+\midrule
+1    & 0.0002 & 0.0109 & 44.5$\times$ \\
+4    & 0.0010 & 0.0318 & 32.6$\times$ \\
+16   & 0.0039 & 0.0490 & 12.5$\times$ \\
+64   & 0.0156 & 0.0868 &  5.6$\times$ \\
+256  & 0.0625 & 0.1679 &  2.7$\times$ \\
+512  & 0.1250 & 0.2433 &  1.9$\times$ \\
+1024 & 0.2500 & 0.3617 &  1.4$\times$ \\
+2048 & 0.5000 & 0.5652 &  1.1$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Detailed Metrics}
+
+Table~\ref{tab:alignment_metrics} reports the full set of alignment metrics averaged over all 32 layers and 8 experts.
+
+\begin{table}[h]
+\centering
+\caption{Alignment metrics averaged over all layers and experts.}
+\label{tab:alignment_metrics}
+\small
+\begin{tabular}{r r r r r r}
+\toprule
+$k$ & $E(k)$ & $\Delta$ & $z$ & $\sigma_{\text{shuffle}}$ & $\mu_{\text{shuffle}}$ \\
+\midrule
+1    & 0.065 & 0.054 & 2.29 & 0.022 & 0.011 \\
+2    & 0.170 & 0.143 & 2.41 & 0.056 & 0.027 \\
+4    & 0.192 & 0.160 & 2.48 & 0.061 & 0.032 \\
+8    & 0.208 & 0.169 & 2.45 & 0.066 & 0.039 \\
+16   & 0.228 & 0.179 & 2.36 & 0.071 & 0.049 \\
+32   & 0.253 & 0.189 & 2.36 & 0.076 & 0.064 \\
+64   & 0.285 & 0.198 & 2.31 & 0.082 & 0.087 \\
+128  & 0.326 & 0.208 & 2.32 & 0.087 & 0.118 \\
+256  & 0.385 & 0.217 & 2.30 & 0.092 & 0.168 \\
+512  & 0.462 & 0.219 & 2.26 & 0.095 & 0.243 \\
+1024 & 0.565 & 0.204 & 2.20 & 0.091 & 0.362 \\
+2048 & 0.712 & 0.147 & 2.12 & 0.068 & 0.565 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Layer~0 Anomaly}
+
+Layer~0 is the only layer that exhibits negative $z$-scores, with values reaching $z = -1.13$ at $k = 32$. For $k \in [8, 512]$ the true router--expert alignment falls \emph{below} the shuffled baseline, suggesting that layer~0 router vectors are not aligned with their experts' principal directions in the way observed in all other layers. This may reflect the distinct role of the first MoE layer, which operates on representations that have not yet been refined by deeper transformer blocks.
+
+\subsubsection{$\cos^2\theta$ Across Depth}
+
+At $k = 1$, the squared cosine between the router vector and the leading right singular vector of its expert varies substantially across layers (Table~\ref{tab:cos_squared}). The alignment is strongest in layers~22--26 and weakest in layers~0, 19--20.
+
+\begin{table}[h]
+\centering
+\caption{Per-layer $\cos^2\theta$ at $k=1$ (selected layers).}
+\label{tab:cos_squared}
+\small
+\begin{tabular}{l r}
+\toprule
+Layer & Mean $\cos^2\theta$ \\
+\midrule
+0 (lowest)  & 0.006 \\
+19          & 0.004 \\
+20          & 0.015 \\
+\midrule
+22          & 0.104 \\
+23          & 0.137 \\
+24 (highest)& 0.148 \\
+25          & 0.118 \\
+26          & 0.107 \\
+\midrule
+\textit{Global avg.} & \textit{0.065} \\
+\bottomrule
+\end{tabular}
+\end{table}

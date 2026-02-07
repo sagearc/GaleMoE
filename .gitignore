@@ -12,3 +12,7 @@ wheels/
 # Project-specific cache and results
 svd_cache/
 results/
+*pkl
+*png
+.vscode/
+.gitignore

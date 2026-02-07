@@ -1,15 +1,107 @@
 """SVD-based alignment analyzer for router-expert analysis."""
+import pickle
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch import Generator, Tensor
 
-from src.analysis.core.analyzer import AlignmentAnalyzer
-from src.analysis.core.data_structures import AlignmentResult, LayerWeights
-from src.analysis.storage.cache import SVDCache
+from src.alignment_analysis.base import AlignmentAnalyzer, AlignmentResult, LayerWeights
+from src.utils import OutputDir, sanitize_model_id
 
 # Constants
 _EPSILON = 1e-12  # Small epsilon for numerical stability
+
+
+class SVDCache:
+    """Cache for SVD decompositions across the entire network.
+    
+    Persists to disk so it can be reused across runs.
+    Cache directory is always created relative to the project root (GaleMoE/),
+    regardless of where the script is run from.
+    """
+    
+    def __init__(self, cache_dir: Optional[str] = None):
+        """Initialize SVD cache.
+        
+        Args:
+            cache_dir: Optional cache directory path. If None, uses 'svd_cache' 
+                      relative to project root. If relative path provided,
+                      it's relative to project root. If absolute path provided, uses as-is.
+        """
+        self._cache_dir = OutputDir.resolve(cache_dir, default_subdir="svd_cache")
+        self._memory_cache: Dict[Tuple[str, int, int], Tensor] = {}
+    
+    @property
+    def cache_dir(self) -> Path:
+        return self._cache_dir.path
+    
+    def _get_cache_key(self, model_id: str, layer: int, expert: int) -> Tuple[str, int, int]:
+        return (model_id, layer, expert)
+    
+    def _get_cache_file(self, model_id: str, layer: int, expert: int) -> Path:
+        safe_model_id = sanitize_model_id(model_id)
+        filename = f"{safe_model_id}_layer{layer}_expert{expert}.pkl"
+        return self.cache_dir / filename
+    
+    def get(self, model_id: str, layer: int, expert: int, w_in: Tensor) -> Optional[Tensor]:
+        """Get cached V matrix, or None if not cached.
+        
+        Args:
+            model_id: Model identifier
+            layer: Layer number
+            expert: Expert index
+            w_in: Expert weight matrix (unused, kept for API compatibility)
+            
+        Returns:
+            Cached V matrix if available, None otherwise
+        """
+        key = self._get_cache_key(model_id, layer, expert)
+        
+        if key in self._memory_cache:
+            return self._memory_cache[key]
+        
+        cache_file = self._get_cache_file(model_id, layer, expert)
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'rb') as f:
+                    V = pickle.load(f)
+                self._memory_cache[key] = V
+                return V
+            except Exception as e:
+                print(f"Warning: Failed to load cache for {cache_file}: {e}")
+        
+        return None
+    
+    def put(self, model_id: str, layer: int, expert: int, V: Tensor) -> None:
+        """Cache V matrix to both memory and disk.
+        
+        Args:
+            model_id: Model identifier
+            layer: Layer number
+            expert: Expert index
+            V: V matrix (right singular vectors) to cache
+        """
+        key = self._get_cache_key(model_id, layer, expert)
+        self._memory_cache[key] = V
+        
+        cache_file = self._get_cache_file(model_id, layer, expert)
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(V, f)
+        except Exception as e:
+            print(f"Warning: Failed to save cache to {cache_file}: {e}")
+    
+    def clear(self) -> None:
+        """Clear memory cache (disk cache remains)."""
+        self._memory_cache.clear()
+    
+    def clear_all(self) -> None:
+        """Clear both memory and disk cache."""
+        self._memory_cache.clear()
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            cache_file.unlink()
+        print(f"Cleared all SVD cache files from {self.cache_dir}")
 
 
 class SVDAlignmentAnalyzer(AlignmentAnalyzer):
@@ -24,10 +116,10 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
     ):
         self._k_list = tuple(int(k) for k in k_list)
         self._n_shuffles = int(n_shuffles)
-        self._seed = int(seed)  # Store seed for results metadata
+        self._seed = int(seed)
         self.rng = Generator()
         self.rng.manual_seed(seed)
-        self.svd_cache = svd_cache or SVDCache()  # Use shared cache by default
+        self.svd_cache = svd_cache or SVDCache()
     
     @property
     def method_name(self) -> str:
@@ -51,49 +143,26 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
 
     @staticmethod
     def _align_proj_energy(router_vec: Tensor, V: Tensor, k: int) -> float:
-        """
-        Projection energy of normalized router vec onto top-k RIGHT singular subspace.
-        router_vec: [d_model] - should already be normalized and on CPU
-        V: [d_model, d_model] - precomputed right singular vectors from SVD
-        k: number of top singular vectors to use
-        """
+        """Projection energy of normalized router vec onto top-k RIGHT singular subspace."""
         k = min(k, V.shape[1])
-        Vk = V[:, :k]  # [d_model, k]
-        proj = Vk.T @ router_vec  # [k] - router_vec already normalized
+        Vk = V[:, :k]
+        proj = Vk.T @ router_vec
         return float((proj * proj).sum().clamp(0.0, 1.0).item())
     
     @staticmethod
     def _align_cos_squared(router_vec: Tensor, V: Tensor) -> float:
-        """
-        Squared cosine of angle between router vector and first singular vector.
-        This is a direct correlation-style measure: cos^2(theta) where theta
-        is the angle between router_vec and the top singular vector.
-        
-        For k=1, this is equivalent to the projection energy, but computed
-        more directly as the squared dot product.
-        
-        router_vec: [d_model] - should already be normalized and on CPU
-        V: [d_model, d_model] - precomputed right singular vectors from SVD
-        
-        Returns:
-            cos^2(theta) where theta is angle between router_vec and v1 (first singular vector)
-        """
-        v1 = V[:, 0]  # First (top) singular vector [d_model]
-        # Since router_vec is normalized, dot product = cos(theta)
-        cos_theta_tensor = router_vec @ v1  # [1] tensor
+        """Squared cosine of angle between router vector and first singular vector."""
+        v1 = V[:, 0]
+        cos_theta_tensor = router_vec @ v1
         cos_squared_tensor = (cos_theta_tensor * cos_theta_tensor).clamp(0.0, 1.0)
         return float(cos_squared_tensor.item())
     
     @staticmethod
     def _compute_svd(w_in: Tensor) -> Tensor:
-        """
-        Precompute SVD once for an expert weight matrix.
-        Returns V matrix (right singular vectors).
-        """
+        """Precompute SVD once for an expert weight matrix. Returns V matrix."""
         W = w_in.float().cpu()
         _, _, Vh = torch.linalg.svd(W, full_matrices=False)
-        V = Vh.transpose(0, 1)  # [d_model, d_model]
-        return V
+        return Vh.transpose(0, 1)
 
     def _shuffle_stats(
         self, 
@@ -101,16 +170,7 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         expert_Vs: List[Tensor], 
         R: Tensor
     ) -> Dict[int, Tuple[float, float]]:
-        """Compute shuffle statistics using precomputed SVDs and pre-normalized router vectors.
-        
-        Args:
-            layer_w: Layer weights (used for number of experts)
-            expert_Vs: Precomputed V matrices from SVD for each expert
-            R: Pre-normalized router vectors [n_experts, d_model] already on CPU
-            
-        Returns:
-            Dictionary mapping k values to (mean, std) tuples of shuffle statistics
-        """
+        """Compute shuffle statistics using precomputed SVDs and pre-normalized router vectors."""
         n = len(layer_w.experts_w_in)
         stats: Dict[int, Tuple[float, float]] = {}
 
@@ -119,7 +179,6 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
             for _ in range(self.n_shuffles):
                 perm = torch.randperm(n, generator=self.rng)
                 for i in range(n):
-                    # Use precomputed V matrix and pre-normalized R[i]
                     vals.append(self._align_proj_energy(R[i], expert_Vs[int(perm[i])], k))
             vals_tensor = torch.tensor(vals)
             mu = float(vals_tensor.mean().item())
@@ -129,27 +188,12 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         return stats
 
     def _normalize_router_vectors(self, gate_w: Tensor) -> Tensor:
-        """Normalize router (gate) vectors for efficient computation.
-        
-        Args:
-            gate_w: Gate weight matrix [n_experts, d_model]
-            
-        Returns:
-            Normalized router vectors [n_experts, d_model]
-        """
+        """Normalize router (gate) vectors for efficient computation."""
         R = gate_w.float().cpu()
-        R = R / (R.norm(dim=1, keepdim=True) + _EPSILON)
-        return R
+        return R / (R.norm(dim=1, keepdim=True) + _EPSILON)
     
     def _compute_expert_svds(self, layer_w: LayerWeights) -> List[Tensor]:
-        """Compute or load SVD decompositions for all experts with caching.
-        
-        Args:
-            layer_w: Layer weights containing expert weights
-            
-        Returns:
-            List of V matrices (right singular vectors) for each expert
-        """
+        """Compute or load SVD decompositions for all experts with caching."""
         n_experts = len(layer_w.experts_w_in)
         print(f"Precomputing SVDs for layer {layer_w.layer} ({n_experts} experts)...")
         print(f"  Cache directory: {self.svd_cache.cache_dir.absolute()}")
@@ -158,14 +202,12 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         cached_count = 0
         
         for i, w_in in enumerate(layer_w.experts_w_in):
-            # Try to get from cache first
             cached_V = self.svd_cache.get(layer_w.model_id, layer_w.layer, i, w_in)
             if cached_V is not None:
                 expert_Vs.append(cached_V)
                 cached_count += 1
                 print(f"  Expert {i}: Loaded from cache")
             else:
-                # Compute and cache
                 print(f"  Expert {i}: Computing SVD...")
                 V = self._compute_svd(w_in)
                 self.svd_cache.put(layer_w.model_id, layer_w.layer, i, V)
@@ -185,32 +227,15 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         expert_Vs: List[Tensor],
         R: Tensor,
     ) -> List[Dict[str, float]]:
-        """Compute alignment scores (projection energy) for all expert-k combinations.
-        
-        For k=1, also computes cos^2(theta) as a direct correlation measure.
-        
-        Args:
-            expert_Vs: Precomputed V matrices for each expert
-            R: Pre-normalized router vectors [n_experts, d_model]
-            
-        Returns:
-            List of dictionaries containing alignment scores (expert, k, align, cos_squared)
-        """
+        """Compute alignment scores (projection energy) for all expert-k combinations."""
         n_experts = len(expert_Vs)
         scores = []
         
         for i in range(n_experts):
             for k in self.k_list:
-                # Compute alignment score (projection energy)
                 align = self._align_proj_energy(R[i], expert_Vs[i], k)
+                score_dict = {"expert": i, "k": int(k), "align": align}
                 
-                score_dict = {
-                    "expert": i,
-                    "k": int(k),
-                    "align": align,
-                }
-                
-                # For k=1, also compute cos^2(theta) as correlation-style measure
                 if k == 1:
                     cos_squared = self._align_cos_squared(R[i], expert_Vs[i])
                     score_dict["cos_squared"] = cos_squared
@@ -226,33 +251,18 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         shuffle_stats: Dict[int, Tuple[float, float]],
         d_model: int,
     ) -> List[AlignmentResult]:
-        """Create AlignmentResult objects from alignment scores.
-        
-        Computes all derived statistics (random expectation, effect, shuffle comparison, etc.)
-        from the raw alignment scores.
-        
-        Args:
-            layer_w: Layer weights (for model_id and layer info)
-            scores: List of score dictionaries from _compute_alignment_scores (expert, k, align)
-            shuffle_stats: Shuffle statistics dict mapping k -> (mean, std)
-            d_model: Model dimension
-            
-        Returns:
-            List of AlignmentResult objects with all computed statistics
-        """
+        """Create AlignmentResult objects from alignment scores."""
         results = []
         
         for score in scores:
             align = score["align"]
             k = score["k"]
             expert = score["expert"]
-            cos_squared = score.get("cos_squared", 0.0)  # Only set for k=1
+            cos_squared = score.get("cos_squared", 0.0)
             
-            # Compute baseline expectations
             random_expect = float(k / d_model)
             effect = float(align - random_expect)
             
-            # Get shuffle statistics
             mu, sd = shuffle_stats[k]
             delta = float(align - mu)
             z = float(delta / sd) if sd > _EPSILON else 0.0
@@ -284,30 +294,10 @@ class SVDAlignmentAnalyzer(AlignmentAnalyzer):
         2. Compute/load expert SVDs
         3. Compute shuffle statistics
         4. Compute alignment results
-        
-        Args:
-            layer_w: Layer weights containing router and expert weights
-            
-        Returns:
-            List of alignment results for all expert-k combinations
         """
-        # Step 1: Normalize router vectors once
         R = self._normalize_router_vectors(layer_w.gate_w)
-        
-        # Step 2: Compute or load SVDs for all experts (with caching)
         expert_Vs = self._compute_expert_svds(layer_w)
-        
-        # Step 3: Compute shuffle statistics for null distribution
         shuffle_stats = self._shuffle_stats(layer_w, expert_Vs, R)
-        
-        # Step 4: Compute alignment scores (projection energy only)
         scores = self._compute_alignment_scores(expert_Vs, R)
-        
-        # Step 5: Create result objects with all derived statistics
         d_model = int(layer_w.gate_w.shape[1])
-        results = self._create_alignment_results(
-            layer_w, scores, shuffle_stats, d_model
-        )
-        
-        return results
-
+        return self._create_alignment_results(layer_w, scores, shuffle_stats, d_model)
