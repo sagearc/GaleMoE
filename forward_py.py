@@ -49,12 +49,11 @@ def prepare_output_dir(output_dir: str) -> Path:
     output_dir.mkdir(parents=True)
 
     for layer in LAYERS_TO_PATCH:
-        router_dir: Path = output_dir / f"layer={layer:02}/router"
-        router_dir.mkdir(parents=True)
+        router_dir: Path = output_dir / f"layer={layer:02}"
+        router_dir.mkdir()
         for expert in range(NUM_EXPERTS):
-            for w_id in W_IDS:
-                group_dir: Path = output_dir / f"layer={layer:02}/expert={expert}/w={w_id}"
-                group_dir.mkdir(parents=True)
+                group_dir: Path = output_dir / f"layer={layer:02}/expert={expert}"
+                group_dir.mkdir()
     return output_dir
 
 
@@ -178,7 +177,7 @@ if __name__ == "__main__":
     repo_ranks = df['rank'].tolist()
     prompts = df['username/repo_name'].tolist()
 
-    for i, (row_id, prompt) in zip(repo_ranks, prompts):
+    for i, (row_id, prompt) in enumerate(zip(repo_ranks, prompts)):
         row_idx_to_prompt[i] = (row_id, prompt)
 
     output, input_ids = run_forward_pass(model, tokenizer, prompts)
