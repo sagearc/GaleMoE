@@ -1,4 +1,4 @@
-"""Data loading for router subspace ablation: abstract batch loader + implementations."""
+"""Data loading: abstract batch loader + implementations."""
 from __future__ import annotations
 
 import os

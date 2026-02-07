@@ -1,4 +1,4 @@
-"""Vector utilities: load SVD vectors, project out directions."""
+"""Vector utilities: load SVD vectors, project out / inject / subtract directions."""
 from __future__ import annotations
 
 import os
@@ -73,7 +73,7 @@ class ExpertVectors:
 
 
 class VectorIntervention:
-    """Vector operations for subspace ablation: random/orthogonal directions and project-out.
+    """Vector operations: random/orthogonal directions, project-out, inject, subtract.
     Singleton: use VectorIntervention() to get the single shared instance.
     """
 
@@ -111,3 +111,31 @@ class VectorIntervention:
             )
         dot = torch.dot(base_vector, remove_vector)
         return base_vector - (dot * remove_vector)
+
+    @staticmethod
+    def inject(
+        base_vector: torch.Tensor,
+        direction: torch.Tensor,
+        scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Add a component along direction: base + scale * unit(direction)."""
+        if base_vector.device != direction.device:
+            direction = direction.to(
+                base_vector.device, dtype=base_vector.dtype
+            )
+        unit = direction / (direction.norm() + 1e-12)
+        return base_vector + scale * unit
+
+    @staticmethod
+    def subtract(
+        base_vector: torch.Tensor,
+        direction: torch.Tensor,
+        scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Remove a component along direction: base - scale * unit(direction)."""
+        if base_vector.device != direction.device:
+            direction = direction.to(
+                base_vector.device, dtype=base_vector.dtype
+            )
+        unit = direction / (direction.norm() + 1e-12)
+        return base_vector - scale * unit

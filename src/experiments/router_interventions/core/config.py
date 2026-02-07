@@ -1,4 +1,4 @@
-"""Configuration for router subspace ablation (project-out) experiment."""
+"""Configuration for router intervention experiments."""
 from __future__ import annotations
 
 from dataclasses import dataclass
