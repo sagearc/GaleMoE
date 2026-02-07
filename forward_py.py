@@ -40,7 +40,7 @@ NUM_EXPERTS = 8
 W_IDS = (1, 3)
 LAYERS_TO_PATCH = [i for i in range(32)]
 
-OUTPUT_DIR = "output/py"
+OUTPUT_DIR = "output/genesis"
 
 
 def prepare_output_dir(output_dir: str) -> Path:
@@ -60,7 +60,7 @@ def prepare_output_dir(output_dir: str) -> Path:
 def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text) -> tuple[MoeCausalLMOutputWithPast, torch.Tensor]:
     """Tokenize input, run forward pass, and track expert activations."""
     # Tokenize the input
-    inputs = tokenizer(batch_text, return_tensors="pt", truncation=True, max_length=32, padding=True)
+    inputs = tokenizer(batch_text, return_tensors="pt", truncation=True, padding=True)
     input_ids = inputs["input_ids"].to(model.device)
     attention_mask = inputs["attention_mask"].to(model.device)
     
@@ -145,7 +145,11 @@ if __name__ == "__main__":
     print(f"Output directory: {OUTPUT_DIR}")
     print()
 
-    df = pd.read_csv('data/py_repos.csv', usecols=['rank', 'username/repo_name'])
+    df_genesis = pd.read_csv('data/genesis.csv')
+    df_genesis_by_chapter = df_genesis.groupby('chapter').apply(lambda g: g.sort_values('verse')['text'].tolist())
+    df_genesis_by_chapter = df_genesis_by_chapter.apply(lambda verses: '\n'.join(verses))
+    df = df_genesis_by_chapter.to_frame(name='text').reset_index()
+
     loop = tqdm(range(1), total=1)
     patch_loop(model, loop)
 
@@ -174,8 +178,8 @@ if __name__ == "__main__":
 
     iter_loop = iter(loop)
 
-    repo_ranks = df['rank'].tolist()
-    prompts = df['username/repo_name'].tolist()
+    repo_ranks = df['verse'].tolist()
+    prompts = df['text'].tolist()
 
     for i, (row_id, prompt) in enumerate(zip(repo_ranks, prompts)):
         row_idx_to_prompt[i] = (row_id, prompt)
