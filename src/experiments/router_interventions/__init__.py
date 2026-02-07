@@ -1,12 +1,18 @@
-"""Router interventions: project out, inject, or subtract directions from router rows.
+"""Router interventions: two experiments.
 
-Measure loss and token-distribution change (KL/CE) when modifying router weights
-using expert SVD directions (or orthogonal/random). Requires precomputed SVD pickle files.
+1. Project out: project out SVDs from all experts, compare loss.
+2. Vector interventions: inject, subtract, project_out with many vectors;
+   compare loss and token distributions (KL/CE, confusion matrix).
+
+Requires precomputed SVD pickle files.
 
 Usage::
 
-    python -m src.experiments.router_interventions.run --svd_dir /path/to/pkl --layer_idx 5
-    python -m src.experiments.router_interventions.run_vector_intervention --svd_dir /path/to/pkl --layer_idx 5
+    # Experiment 1: project out SVDs from all experts, compare loss
+    python -m src.experiments.router_interventions.run_project_out --svd_dir /path/to/pkl --layer_idx 5
+
+    # Experiment 2: vector interventions (inject, subtract, project_out), loss + token distributions
+    python -m src.experiments.router_interventions.run_vector_interventions --svd_dir /path/to/pkl --layer_idx 5
 """
 from .core import (
     ExperimentConfig,
@@ -20,8 +26,8 @@ from .core import (
     VectorIntervention,
 )
 from .runners import (
-    SubspaceAblationRunner,
-    run_ablation_experiment,
+    ProjectOutRunner,
+    run_project_out_experiment,
     run_vector_intervention_experiment,
 )
 from .viz import (
@@ -39,8 +45,8 @@ __all__ = [
     "LossEvaluator",
     "TokenDistributionComparator",
     "RouterManager",
-    "SubspaceAblationRunner",
-    "run_ablation_experiment",
+    "ProjectOutRunner",
+    "run_project_out_experiment",
     "ExpertVectors",
     "VectorIntervention",
     "load_results",

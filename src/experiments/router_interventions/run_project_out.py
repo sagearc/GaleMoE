@@ -1,8 +1,7 @@
-"""CLI for inject/subtract interventions and token distribution comparison.
+"""Experiment 1: Project out SVDs from all experts and compare loss.
 
-Uses the same folder and tools as run.py (config, data, evaluation, router_manager, vectors).
-Run this script for: inject vectors, subtract vectors, project_out; compare token
-distributions (KL/CE) before vs after.
+Project the SVD (or orthogonal/random) direction out of each expert's router row,
+then measure loss and delta vs baseline. No inject/subtract, no token distribution metrics.
 """
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ import argparse
 import logging
 
 from .core import ExperimentConfig
-from .runners import run_vector_intervention_experiment
+from .runners import run_project_out_experiment
 
 
 def main() -> None:
@@ -20,11 +19,11 @@ def main() -> None:
     )
 
     parser = argparse.ArgumentParser(
-        description="Router vector interventions (inject/subtract/project_out) and token distribution metric (KL/CE).",
+        description="Experiment 1: Project out SVDs from all experts, compare loss and delta.",
     )
     parser.add_argument("--svd_dir", type=str, required=True, help="Directory with expert SVD pickle files")
     parser.add_argument("--layer_idx", type=int, required=True, help="MoE layer index")
-    parser.add_argument("--output_file", type=str, default="results_vector_intervention.json")
+    parser.add_argument("--output_file", type=str, default="results_project_out.json")
     parser.add_argument("--num_samples", type=int, default=200)
     parser.add_argument("--model-id", type=str, default="mistralai/Mixtral-8x7B-v0.1")
     parser.add_argument("--model-tag", type=str, default="mistralai_Mixtral_8x7B_v0.1")
@@ -36,32 +35,7 @@ def main() -> None:
         "--variations",
         type=str,
         default="svd,orthogonal,random",
-        help="Comma-separated variants: svd, orthogonal, random",
-    )
-    parser.add_argument(
-        "--interventions",
-        type=str,
-        default="project_out,inject,subtract",
-        help="Comma-separated: project_out, inject, subtract",
-    )
-    parser.add_argument(
-        "--inject-subtract-scale",
-        type=float,
-        default=1.0,
-        help="Scale for inject/subtract (default 1.0)",
-    )
-    parser.add_argument(
-        "--distribution-metric",
-        type=str,
-        default="kl",
-        choices=("kl", "ce"),
-        help="Metric between token distributions: kl or ce",
-    )
-    parser.add_argument(
-        "--confusion-top-k",
-        type=int,
-        default=2,
-        help="Number of top tokens for confusion matrix (default 2, Mixtral expert top-k); larger k = finer matrix",
+        help="Comma-separated: svd, orthogonal, random",
     )
     parser.add_argument(
         "--dataset",
@@ -80,7 +54,6 @@ def main() -> None:
     args = parser.parse_args()
 
     variations = [v.strip() for v in args.variations.split(",") if v.strip()]
-    interventions = [i.strip() for i in args.interventions.split(",") if i.strip()]
     if args.dataset == "text" and not args.text_file:
         parser.error("--dataset=text requires --text-file")
 
@@ -100,13 +73,7 @@ def main() -> None:
         text_file=args.text_file,
     )
 
-    run_vector_intervention_experiment(
-        cfg,
-        interventions=interventions,
-        inject_subtract_scale=args.inject_subtract_scale,
-        distribution_metric_name=args.distribution_metric,
-        confusion_top_k=args.confusion_top_k,
-    )
+    run_project_out_experiment(cfg)
 
 
 if __name__ == "__main__":

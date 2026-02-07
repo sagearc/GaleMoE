@@ -172,7 +172,7 @@ def plot_confusion_from_results(
     """Load confusion matrix for one variant from saved results and plot it.
 
     Reads ``confusion_matrix`` and ``confusion_token_ids`` from
-    results["results"][variant_key] (e.g. from run_vector_intervention output).
+    results["results"][variant_key] (e.g. from run_vector_interventions).
 
     Args:
         results: Full results dict from load_results(...).

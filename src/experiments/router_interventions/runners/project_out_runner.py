@@ -1,4 +1,4 @@
-"""Runner for project-out ablation experiment."""
+"""Runner for project-out experiment: remove direction from router rows, compare loss."""
 from __future__ import annotations
 
 import json
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 VALID_VARIATIONS = ("svd", "orthogonal", "random")
 
 
-class SubspaceAblationRunner:
-    """Runs project-out ablation for one layer: baseline + svd/orthogonal/random variants."""
+class ProjectOutRunner:
+    """Project out a direction from each expert's router row; compare loss (baseline + svd/orthogonal/random)."""
 
     def __init__(
         self,
@@ -80,7 +80,7 @@ class SubspaceAblationRunner:
         return intervention.make_random(v_svd.shape[0], seed=seed)
 
     def run(self) -> Dict[str, Any]:
-        """Load model and data, run ablation variants, save results to config.output_file."""
+        """Load model and data, run project-out variants, save results to config.output_file."""
         tokenizer = AutoTokenizer.from_pretrained(self.config.model_id)
         model = AutoModelForCausalLM.from_pretrained(
             self.config.model_id,
@@ -147,6 +147,6 @@ class SubspaceAblationRunner:
             json.dump(results, f, indent=2)
 
 
-def run_ablation_experiment(cfg: ExperimentConfig) -> Dict[str, Any]:
-    """Convenience function: build runner and run."""
-    return SubspaceAblationRunner(cfg).run()
+def run_project_out_experiment(cfg: ExperimentConfig) -> Dict[str, Any]:
+    """Run project-out experiment: build runner and run."""
+    return ProjectOutRunner(cfg).run()
