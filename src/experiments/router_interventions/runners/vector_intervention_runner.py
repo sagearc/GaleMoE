@@ -59,6 +59,12 @@ def _get_direction(
     intervention: VectorIntervention,
     seed: int,
 ) -> Any:
+    """Get direction vector(s) for intervention.
+    
+    Returns:
+        - For variant="svd": returns v_svd as-is (may be [dim] or [k, dim])
+        - For variant="orthogonal" or "random": returns [dim] tensor (single vector)
+    """
     if variant not in VALID_VARIATIONS:
         raise ValueError(
             f"Unknown variant: {variant!r}. Must be one of {VALID_VARIATIONS}"
@@ -66,9 +72,15 @@ def _get_direction(
     s = seed + exp_idx
     if variant == "svd":
         return v_svd
+    dim = int(v_svd.shape[-1])
     if variant == "orthogonal":
-        return intervention.make_orthogonal(v_svd, seed=s)
-    return intervention.make_random(v_svd.shape[0], seed=s)
+        # Orthogonal to subspace (single vector is the k=1 case)
+        subspace = v_svd.unsqueeze(0) if v_svd.ndim == 1 else v_svd
+        return intervention.make_orthogonal_to_subspace(subspace, seed=s)
+    elif variant == "random":
+        return intervention.make_random(dim, seed=s)
+    else:
+        raise ValueError(f"Unknown variant: {variant!r}. Must be one of {VALID_VARIATIONS}")
 
 
 def _apply_intervention(
@@ -108,6 +120,7 @@ def run_vector_intervention_experiment(
         config.model_id,
         device_map="auto",
         torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=False,
     )
 
     if batch_loader is not None:
@@ -116,11 +129,18 @@ def run_vector_intervention_experiment(
         data_loader = _make_batch_loader(config, tokenizer)
     batches = data_loader.get_batches()
 
+    # Materialize lazy (meta) parameters: run one forward so gate weights are materialized
+    with torch.no_grad():
+        model.eval()
+        device = next(model.parameters()).device
+        _ = model(batches[0].to(device))
+
     expert_vectors = ExpertVectors(
         config.svd_dir,
         config.layer_idx,
         config.num_experts,
         config.model_tag,
+        top_k=config.top_k[0] if config.top_k else 1,
     )
     expert_vectors.load()
     if len(expert_vectors) == 0:

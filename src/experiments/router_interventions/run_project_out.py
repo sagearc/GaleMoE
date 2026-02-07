@@ -34,8 +34,8 @@ def main() -> None:
     parser.add_argument(
         "--variations",
         type=str,
-        default="svd,orthogonal,random",
-        help="Comma-separated: svd, orthogonal, random",
+        default="svd,orthogonal,random,zero,shuffle",
+        help="Comma-separated: svd, orthogonal, random, zero, shuffle",
     )
     parser.add_argument(
         "--dataset",
@@ -50,12 +50,28 @@ def main() -> None:
         default=None,
         help="Path to text file when --dataset=text",
     )
+    parser.add_argument(
+        "--top-k",
+        type=str,
+        default="1",
+        metavar="K1[,K2,...]",
+        help="Top singular vector count(s) to project out: single int or comma-separated list (e.g. 1,2,4,8). Default: 1",
+    )
+    parser.add_argument(
+        "--use-single-device",
+        action="store_true",
+        help="Load model on a single GPU (no device_map). Use if you get 'meta tensor' errors; requires model to fit on one device.",
+    )
 
     args = parser.parse_args()
 
     variations = [v.strip() for v in args.variations.split(",") if v.strip()]
     if args.dataset == "text" and not args.text_file:
         parser.error("--dataset=text requires --text-file")
+
+    top_k = [int(x.strip()) for x in args.top_k.split(",") if x.strip()]
+    if not top_k:
+        parser.error("--top-k must contain at least one integer")
 
     cfg = ExperimentConfig(
         svd_dir=args.svd_dir,
@@ -71,6 +87,8 @@ def main() -> None:
         variations=variations,
         dataset=args.dataset,
         text_file=args.text_file,
+        top_k=top_k,
+        use_single_device=args.use_single_device,
     )
 
     run_project_out_experiment(cfg)

@@ -23,6 +23,8 @@ class ExperimentConfig:
     seq_len: int = 512
     batch_size: int = 4
     seed: int = 42
-    variations: Sequence[str] = ("svd", "orthogonal", "random")
+    variations: Sequence[str] = ("svd", "orthogonal", "random", "zero", "shuffle")
     dataset: str = "wikitext"
     text_file: str | None = None
+    top_k: Sequence[int] = (1,)
+    use_single_device: bool = False  # If True, load with device_map=None to avoid meta tensors

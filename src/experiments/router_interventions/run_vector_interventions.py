@@ -76,6 +76,13 @@ def main() -> None:
         default=None,
         help="Path to text file when --dataset=text",
     )
+    parser.add_argument(
+        "--top-k",
+        type=str,
+        default="1",
+        metavar="K",
+        help="Number of top singular vectors to project out (default: 1). For project-out experiment use run_project_out with comma-separated list.",
+    )
 
     args = parser.parse_args()
 
@@ -83,6 +90,10 @@ def main() -> None:
     interventions = [i.strip() for i in args.interventions.split(",") if i.strip()]
     if args.dataset == "text" and not args.text_file:
         parser.error("--dataset=text requires --text-file")
+
+    top_k = [int(x.strip()) for x in args.top_k.split(",") if x.strip()]
+    if not top_k:
+        top_k = [1]
 
     cfg = ExperimentConfig(
         svd_dir=args.svd_dir,
@@ -98,6 +109,7 @@ def main() -> None:
         variations=variations,
         dataset=args.dataset,
         text_file=args.text_file,
+        top_k=top_k,
     )
 
     run_vector_intervention_experiment(

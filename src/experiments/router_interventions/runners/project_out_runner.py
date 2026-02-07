@@ -18,14 +18,16 @@ from ..core import (
     VectorIntervention,
 )
 from ..core.data import TextListBatchLoader, WikitextBatchLoader
+from ..core.memory import log_gpu_memory, require_gpu_memory_gib
 
 logger = logging.getLogger(__name__)
 
-VALID_VARIATIONS = ("svd", "orthogonal", "random")
+VALID_VARIATIONS = ("svd", "orthogonal", "random", "zero", "shuffle")
+PROJECT_OUT_VARIATIONS = ("svd", "orthogonal", "random")  # require expert vectors
 
 
 class ProjectOutRunner:
-    """Project out a direction from each expert's router row; compare loss (baseline + svd/orthogonal/random)."""
+    """Project out a direction from each expert's router row; compare loss (baseline + variants including zero/shuffle)."""
 
     def __init__(
         self,
@@ -66,27 +68,64 @@ class ProjectOutRunner:
         exp_idx: int,
         intervention: VectorIntervention,
     ) -> torch.Tensor:
-        """Return the direction to project out for this variant. Raises on unknown variant."""
-        if variant not in VALID_VARIATIONS:
+        """Return the direction(s) to project out for this variant. Raises on unknown variant.
+        
+        Returns:
+            - For variant="svd": returns v_svd as-is (may be [dim] or [k, dim])
+            - For variant="orthogonal" or "random": returns [dim] tensor (single vector)
+        """
+        if variant not in PROJECT_OUT_VARIATIONS:
             raise ValueError(
-                f"Unknown variant: {variant!r}. Must be one of {VALID_VARIATIONS}"
+                f"Unknown project-out variant: {variant!r}. Must be one of {PROJECT_OUT_VARIATIONS}"
             )
         seed = self.config.seed + exp_idx
         if variant == "svd":
             return v_svd
+        # For orthogonal and random variants, we need a single vector
+        # Get the first vector if v_svd is [k, dim], otherwise use as-is
+        if v_svd.ndim == 2:
+            v_first = v_svd[0]  # [dim]
+        else:
+            v_first = v_svd  # [dim]
         if variant == "orthogonal":
-            return intervention.make_orthogonal(v_svd, seed=seed)
+            return intervention.make_orthogonal(v_first, seed=seed)
         # variant == "random"
-        return intervention.make_random(v_svd.shape[0], seed=seed)
+        return intervention.make_random(v_first.shape[0], seed=seed)
+
+    def _k_values_to_run(self) -> list[int]:
+        """Return list of top_k values to run."""
+        return list(self.config.top_k)
 
     def run(self) -> Dict[str, Any]:
-        """Load model and data, run project-out variants, save results to config.output_file."""
+        """Load model and data, run project-out variants, save results to config.output_file.
+        Runs over each k in config.top_k. If len(top_k) > 1, stores results in results['by_k'][k];
+        otherwise stores in results['results'] (backward compatible).
+        """
         tokenizer = AutoTokenizer.from_pretrained(self.config.model_id)
-        model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_id,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-        )
+        log_gpu_memory("Before model load")
+
+        load_kwargs: dict = {
+            "torch_dtype": torch.bfloat16,
+            "low_cpu_mem_usage": False,
+        }
+        if self.config.use_single_device:
+            load_kwargs["device_map"] = None
+        else:
+            load_kwargs["device_map"] = "auto"
+        model = AutoModelForCausalLM.from_pretrained(self.config.model_id, **load_kwargs)
+
+        if self.config.use_single_device and torch.cuda.is_available():
+            # bf16: 2 bytes per param; add ~10% for activations/overhead
+            num_params = sum(p.numel() for p in model.parameters())
+            need_gib = (num_params * 2 * 1.1) / (1024**3)
+            if not require_gpu_memory_gib(need_gib, "Model on GPU"):
+                logger.warning(
+                    "Model has ~%.0fM params, needs ~%.1f GiB. "
+                    "Drop --use-single-device to use device_map='auto' (multi-GPU or CPU offload).",
+                    num_params / 1e6, need_gib,
+                )
+            model = model.to("cuda")
+        log_gpu_memory("After model load")
 
         if self._batch_loader is not None:
             data_loader = self._batch_loader
@@ -94,21 +133,31 @@ class ProjectOutRunner:
             data_loader = self._make_batch_loader(tokenizer)
         batches = data_loader.get_batches()
 
-        expert_vectors = ExpertVectors(
-            self.config.svd_dir,
-            self.config.layer_idx,
-            self.config.num_experts,
-            self.config.model_tag,
-        )
-        expert_vectors.load()
-        if len(expert_vectors) == 0:
-            raise RuntimeError("No SVD vectors loaded. Check svd_dir and file names.")
+        # Materialize lazy (meta) parameters: run one forward so gate weights are materialized
+        with torch.no_grad():
+            model.eval()
+            first_batch = batches[0]
+            device = next(model.parameters()).device
+            _ = model(first_batch.to(device))
+        log_gpu_memory("After first forward (batches loaded)")
 
         evaluator = LossEvaluator(model)
+        k_values = self._k_values_to_run()
+        multi_k = len(k_values) > 1
+
         results: Dict[str, Any] = {
             "config": vars(self.config),
             "results": {},
         }
+        if multi_k:
+            results["by_k"] = {}
+
+        # Validate variations
+        for v in self.config.variations:
+            if v not in VALID_VARIATIONS:
+                raise ValueError(
+                    f"Unknown variation: {v!r}. Must be one of {VALID_VARIATIONS}"
+                )
 
         intervention = VectorIntervention()
         with RouterManager(model, self.config.layer_idx) as router:
@@ -117,24 +166,77 @@ class ProjectOutRunner:
             results["baseline_loss"] = base_loss
             logger.info("Baseline loss: %.4f", base_loss)
 
-            for variant in self.config.variations:
-                logger.info("--- Variant: %s ---", variant.upper())
-                modified = router.original_weights.clone()
+            orig = router.original_weights
+            num_experts = orig.shape[0]
 
-                for exp_idx, v_svd in expert_vectors.items():
-                    v_remove = self._get_remove_vector(
-                        variant, v_svd, exp_idx, intervention
-                    )
-                    row = modified[exp_idx]
-                    modified[exp_idx] = intervention.project_out(row, v_remove)
+            # Precompute zero and shuffle once (they don't depend on k)
+            baseline_interventions: Dict[str, Dict[str, Any]] = {}
+            if "zero" in self.config.variations:
+                router.apply_weights(torch.zeros_like(orig))
+                loss_zero = evaluator.evaluate(batches)
+                baseline_interventions["zero"] = {"loss": loss_zero, "delta": loss_zero - base_loss}
+                logger.info("Result [zero]: loss=%.4f, delta=%+.4f", loss_zero, baseline_interventions["zero"]["delta"])
+                router.restore()
+            if "shuffle" in self.config.variations:
+                g = torch.Generator().manual_seed(self.config.seed)
+                perm = torch.randperm(num_experts, generator=g)
+                router.apply_weights(orig[perm].clone())
+                loss_shuffle = evaluator.evaluate(batches)
+                baseline_interventions["shuffle"] = {"loss": loss_shuffle, "delta": loss_shuffle - base_loss}
+                logger.info("Result [shuffle]: loss=%.4f, delta=%+.4f", loss_shuffle, baseline_interventions["shuffle"]["delta"])
+                router.restore()
 
-                router.apply_weights(modified)
-                loss = evaluator.evaluate(batches)
-                delta = loss - base_loss
-                logger.info(
-                    "Result [%s]: loss=%.4f, delta=%+.4f", variant, loss, delta
-                )
-                results["results"][variant] = {"loss": loss, "delta": delta}
+            # Load expert vectors once for max(k) and reuse for each k (avoids repeated disk I/O)
+            max_k = max(k_values)
+            logger.info("Loading expert vectors once (top_k=%d) for all k values", max_k)
+            expert_vectors = ExpertVectors(
+                self.config.svd_dir,
+                self.config.layer_idx,
+                self.config.num_experts,
+                self.config.model_tag,
+                top_k=max_k,
+            )
+            expert_vectors.load()
+            if len(expert_vectors) == 0:
+                raise RuntimeError("No SVD vectors loaded. Check svd_dir and file names.")
+
+            for top_k in k_values:
+                if multi_k:
+                    logger.info("=== top_k=%d ===", top_k)
+                    results["by_k"][top_k] = {}
+
+                for variant in self.config.variations:
+                    if variant in baseline_interventions:
+                        entry = baseline_interventions[variant]
+                        logger.info("--- Variant: %s (baseline intervention, k=%d) ---", variant.upper(), top_k)
+                    else:
+                        logger.info("--- Variant: %s (k=%d) ---", variant.upper(), top_k)
+                        modified = router.original_weights.clone()
+                        for exp_idx, v_svd_full in expert_vectors.items():
+                            # Use first top_k vectors (slice of pre-loaded max_k vectors)
+                            if v_svd_full.ndim == 2:
+                                v_svd = v_svd_full[:top_k]  # [k, dim]
+                                if v_svd.shape[0] == 1:
+                                    v_svd = v_svd[0]  # [dim] for project_out compat
+                            else:
+                                v_svd = v_svd_full
+                            v_remove = self._get_remove_vector(
+                                variant, v_svd, exp_idx, intervention
+                            )
+                            row = modified[exp_idx]
+                            modified[exp_idx] = intervention.project_out(row, v_remove)
+                        router.apply_weights(modified)
+                        loss = evaluator.evaluate(batches)
+                        entry = {"loss": loss, "delta": loss - base_loss}
+                        logger.info(
+                            "Result [%s] k=%d: loss=%.4f, delta=%+.4f",
+                            variant, top_k, entry["loss"], entry["delta"],
+                        )
+
+                    if multi_k:
+                        results["by_k"][top_k][variant] = entry
+                    else:
+                        results["results"][variant] = entry
 
         self._save_results(results)
         return results
