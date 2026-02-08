@@ -40,7 +40,7 @@ NUM_EXPERTS = 8
 W_IDS = (1, 3)
 LAYERS_TO_PATCH = [i for i in range(32)]
 
-OUTPUT_DIR = "output/genesis"
+OUTPUT_DIR = "output/common_words_1k"
 
 
 def prepare_output_dir(output_dir: str) -> Path:
@@ -123,7 +123,20 @@ def free_memory(activations_cache: dict[CacheKey, torch.Tensor]):
 
 if __name__ == "__main__":
     output_dir = prepare_output_dir(OUTPUT_DIR)
-    
+
+    df_genesis = pd.read_csv('data/genesis.csv')
+    df_genesis_by_chapter = df_genesis.groupby('chapter').apply(lambda g: g.sort_values('verse')['text'].tolist())
+    df_genesis_by_chapter = df_genesis_by_chapter.apply(lambda verses: '\n'.join(verses))
+    df = df_genesis_by_chapter.to_frame(name='text').reset_index()
+
+    with open('common_words.txt', 'r') as f:
+        lines = f.readlines()
+    common_words = [line.strip() for line in lines if not line.startswith('#')][:1000]
+
+    prompts = common_words
+    repo_ranks = [i for i in range(len(prompts))]
+    df = pd.DataFrame({'chapter': repo_ranks, 'text': prompts})
+
     # USE ALL EXPERTS FORWARD PASS:
     config = MixtralConfig.from_pretrained("mistralai/Mixtral-8x7B-v0.1",
                                            num_experts_per_tok=8)
@@ -144,11 +157,6 @@ if __name__ == "__main__":
     print(f"Layers to patch: {LAYERS_TO_PATCH}")
     print(f"Output directory: {OUTPUT_DIR}")
     print()
-
-    df_genesis = pd.read_csv('data/genesis.csv')
-    df_genesis_by_chapter = df_genesis.groupby('chapter').apply(lambda g: g.sort_values('verse')['text'].tolist())
-    df_genesis_by_chapter = df_genesis_by_chapter.apply(lambda verses: '\n'.join(verses))
-    df = df_genesis_by_chapter.to_frame(name='text').reset_index()
 
     loop = tqdm(range(1), total=1)
     patch_loop(model, loop)
@@ -178,8 +186,10 @@ if __name__ == "__main__":
 
     iter_loop = iter(loop)
 
-    repo_ranks = df['verse'].tolist()
-    prompts = df['text'].tolist()
+    prompts = common_words
+    repo_ranks = [i for i in range(len(prompts))]
+    # repo_ranks = df['chapter'].tolist()[:10]
+    # prompts = df['text'].tolist()[:10]
 
     for i, (row_id, prompt) in enumerate(zip(repo_ranks, prompts)):
         row_idx_to_prompt[i] = (row_id, prompt)
