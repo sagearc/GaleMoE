@@ -28,10 +28,28 @@ import numpy as np
 def load_results(filepath: str | Path) -> Dict[str, Any]:
     """Load a single results JSON."""
     with open(filepath) as f:
-        return json.load(f)
+        data = json.load(f)
+    
+    # Backward compatibility: if using old format (k-independent stored redundantly),
+    # normalize to new format with k_independent section
+    if "k_independent" not in data and "by_k" in data:
+        # Extract k-independent variants from the first k entry
+        first_k = next(iter(data["by_k"].values()), {})
+        k_independent = {}
+        for variant in ["zero", "shuffle", "random", "orthogonal"]:
+            if variant in first_k:
+                k_independent[variant] = first_k[variant]
+        if k_independent:
+            data["k_independent"] = k_independent
+            # Remove from all by_k entries to clean up
+            for k_entry in data["by_k"].values():
+                for variant in k_independent:
+                    k_entry.pop(variant, None)
+    
+    return data
 
 
-def load_results_dir(results_dir: str | Path, glob: str = "project_out_*.json") -> List[Dict[str, Any]]:
+def load_results_dir(results_dir: str | Path, glob: str = "project_out_L*.json") -> List[Dict[str, Any]]:
     """Load all matching JSONs from *results_dir*, sorted by layer index."""
     paths = sorted(Path(results_dir).glob(glob))
     if not paths:
@@ -51,17 +69,31 @@ def plot_delta_vs_k(
     variants: Optional[List[str]] = None,
     title: Optional[str] = None,
     figsize: tuple[float, float] = (8, 5),
+    ylim: Optional[tuple[float, float]] = None,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """One line per variant, x = k, y = loss delta.  Needs ``by_k`` in *results*."""
+    """One line per variant, x = k, y = loss delta.  Needs ``by_k`` in *results*.
+    
+    Args:
+        ylim: Optional y-axis limits as (ymin, ymax). Use to zoom into smaller deltas.
+    """
     by_k = results.get("by_k", {})
     if not by_k:
         raise ValueError("No 'by_k' in results. Run with multiple --top-k values.")
     layer = results.get("config", {}).get("layer_idx", "?")
+    k_independent = results.get("k_independent", {})
 
     k_vals = sorted(int(k) for k in by_k)
-    first = by_k[str(k_vals[0])] if str(k_vals[0]) in by_k else by_k[k_vals[0]]
-    all_variants = sorted(v for v in first if isinstance(first[v], dict) and "delta" in first[v])
+    
+    # Merge k_independent variants into all k values for plotting
+    merged_by_k = {}
+    for k in k_vals:
+        k_str = str(k)
+        merged_by_k[k] = {**k_independent, **by_k.get(k_str, by_k.get(k, {}))}
+    
+    # Get all variants from merged data
+    first = merged_by_k[k_vals[0]]
+    all_variants = sorted(v for v in first if isinstance(first.get(v), dict) and "delta" in first[v])
     variants = variants or all_variants
 
     fig, ax = plt.subplots(figsize=figsize)
@@ -69,7 +101,7 @@ def plot_delta_vs_k(
     for i, var in enumerate(variants):
         deltas = []
         for k in k_vals:
-            entry = by_k.get(str(k), by_k.get(k, {}))
+            entry = merged_by_k.get(k, {})
             d = entry.get(var, {}).get("delta")
             deltas.append(d)
         if all(d is not None for d in deltas):
@@ -78,6 +110,8 @@ def plot_delta_vs_k(
     ax.set_ylabel("Loss delta")
     ax.set_title(title or f"Loss delta vs k  (layer {layer})")
     ax.axhline(0, color="gray", ls="--", lw=0.8)
+    if ylim is not None:
+        ax.set_ylim(ylim)
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -97,20 +131,32 @@ def plot_delta_vs_layers(
     variants: Optional[List[str]] = None,
     title: Optional[str] = None,
     figsize: tuple[float, float] = (10, 5),
+    ylim: Optional[tuple[float, float]] = None,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """One line per variant, x = layer, y = loss delta for a fixed *k*."""
+    """One line per variant, x = layer, y = loss delta for a fixed *k*.
+    
+    Args:
+        ylim: Optional y-axis limits as (ymin, ymax). Use to zoom into smaller deltas.
+    """
     by_layer: Dict[int, Dict[str, float]] = {}
     for res in results_list:
         layer = res.get("config", {}).get("layer_idx")
         if layer is None:
             continue
+        
+        # Merge k_independent and by_k[k] data
+        k_independent = res.get("k_independent", {})
         by_k = res.get("by_k", {})
-        entry = by_k.get(str(k), by_k.get(k))
-        if entry is None:
+        k_entry = by_k.get(str(k), by_k.get(k, {}))
+        
+        # Combine k-independent and k-dependent data
+        merged_entry = {**k_independent, **k_entry}
+        if not merged_entry:
             continue
-        by_layer[layer] = {v: entry[v]["delta"] for v in entry
-                           if isinstance(entry.get(v), dict) and "delta" in entry[v]}
+            
+        by_layer[layer] = {v: merged_entry[v]["delta"] for v in merged_entry
+                           if isinstance(merged_entry.get(v), dict) and "delta" in merged_entry[v]}
     if not by_layer:
         raise ValueError(f"No results with by_k[{k}]")
 
@@ -129,6 +175,8 @@ def plot_delta_vs_layers(
     ax.set_ylabel("Loss delta")
     ax.set_title(title or f"Loss delta vs layer  (k={k})")
     ax.axhline(0, color="gray", ls="--", lw=0.8)
+    if ylim is not None:
+        ax.set_ylim(ylim)
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.set_xticks(layers)
