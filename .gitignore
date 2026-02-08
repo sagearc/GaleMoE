@@ -12,3 +12,4 @@ wheels/
 # Project-specific cache and results
 svd_cache/
 results/
+.vscode/

@@ -1,37 +1,26 @@
-"""Router interventions: two experiments.
-
-1. Project out: project out SVDs from all experts, compare loss.
-2. Vector interventions: inject, subtract, project_out with many vectors;
-   compare loss and token distributions (KL/CE, confusion matrix).
-
-Requires precomputed SVD pickle files.
+"""Router interventions: project out expert SVD directions from router rows.
 
 Usage::
 
-    # Experiment 1: project out SVDs from all experts, compare loss
-    python -m src.experiments.router_interventions.run_project_out --svd_dir /path/to/pkl --layer_idx 5
+    # 1. Build SVD cache from expert w1
+    python -m src.experiments.router_interventions.run_svd_from_expert \\
+        --cache-dir svd_cache --layer_idx 0 1 2 ... 31
 
-    # Experiment 2: vector interventions (inject, subtract, project_out), loss + token distributions
-    python -m src.experiments.router_interventions.run_vector_interventions --svd_dir /path/to/pkl --layer_idx 5
+    # 2. Run project-out experiment
+    python -m src.experiments.router_interventions.run_project_out \\
+        --svd-dir svd_cache --layer-idx {0..31} --top-k 1,2,4,8,16,32,64
 """
 from .core import (
     ExperimentConfig,
     BatchLoader,
-    TextListBatchLoader,
-    WikitextBatchLoader,
     LossEvaluator,
-    TokenDistributionComparator,
     RouterManager,
     ExpertVectors,
     VectorIntervention,
 )
-from .runners import (
-    ProjectOutRunner,
-    run_project_out_experiment,
-    run_vector_intervention_experiment,
-)
 from .viz import (
     load_results,
+    load_results_dir,
     plot_ablation_results,
     plot_confusion_heatmap,
     plot_confusion_from_results,
@@ -42,20 +31,15 @@ from .viz import (
 __all__ = [
     "ExperimentConfig",
     "BatchLoader",
-    "WikitextBatchLoader",
-    "TextListBatchLoader",
     "LossEvaluator",
-    "TokenDistributionComparator",
     "RouterManager",
-    "ProjectOutRunner",
-    "run_project_out_experiment",
     "ExpertVectors",
     "VectorIntervention",
     "load_results",
+    "load_results_dir",
     "plot_ablation_results",
     "plot_confusion_heatmap",
     "plot_confusion_from_results",
     "plot_delta_vs_k",
     "plot_delta_vs_layers",
-    "run_vector_intervention_experiment",
 ]

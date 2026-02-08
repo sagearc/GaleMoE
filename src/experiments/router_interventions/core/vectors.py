@@ -1,4 +1,4 @@
-"""Vector utilities: load SVD vectors, project out / inject / subtract directions."""
+"""Load expert SVD vectors and apply vector interventions (project-out, inject, subtract)."""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,12 @@ logger = logging.getLogger(__name__)
 
 
 class ExpertVectors:
-    """Loads and holds per-expert SVD (top singular) vectors from pickle files."""
+    """Per-expert SVD vectors loaded from pickle files.
+
+    Cache convention: each file is a raw tensor V of shape (dim, dim) with
+    columns = right singular vectors, or a dict with key "Vh" holding a matrix
+    with rows = vectors.  The loader normalises both to [top_k, dim].
+    """
 
     def __init__(
         self,
@@ -29,93 +34,90 @@ class ExpertVectors:
         self.top_k = top_k
         self._vectors: Dict[int, torch.Tensor] = {}
 
+    # -- I/O ----------------------------------------------------------------
+
     def load(self) -> None:
-        """Load all expert vectors from svd_dir; raise if any file is missing."""
+        """Load all expert vectors from svd_dir."""
         self._vectors.clear()
-        paths = [self._path_for_expert(i) for i in range(self.num_experts)]
-        logger.info(
-            "Loading SVD from %s: %s",
-            os.path.abspath(self.svd_dir),
-            ", ".join(os.path.basename(p) for p in paths),
-        )
+        logger.info("Loading SVD vectors from %s (layer %d, top_k=%d)",
+                     os.path.abspath(self.svd_dir), self.layer_idx, self.top_k)
         for i in range(self.num_experts):
-            path = paths[i]
+            path = self._path_for(i)
             self._vectors[i] = self._load_single(path)
 
-    def _path_for_expert(self, expert_idx: int) -> str:
-        fname = f"{self.model_tag}_layer{self.layer_idx}_expert{expert_idx}.pkl"
-        return os.path.join(self.svd_dir, fname)
+    def _path_for(self, expert_idx: int) -> str:
+        return os.path.join(
+            self.svd_dir,
+            f"{self.model_tag}_layer{self.layer_idx}_expert{expert_idx}.pkl",
+        )
 
     def _load_single(self, filepath: str) -> torch.Tensor:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"SVD file not found: {filepath}")
         with open(filepath, "rb") as f:
             obj = pickle.load(f)
-        tensor = None
-        if isinstance(obj, dict):
-            for key in ["Vh", "vh", "V", "v"]:
-                if key in obj:
-                    tensor = obj[key]
-                    break
-        elif isinstance(obj, (tuple, list)) and len(obj) >= 3:
-            tensor = obj[2]
-        elif isinstance(obj, torch.Tensor):
-            tensor = obj
-        if tensor is None:
-            raise ValueError(f"Could not extract vector from {filepath}")
-        t = torch.as_tensor(tensor, dtype=torch.float32, device="cpu")
-        
-        # Handle 2D matrices
-        if t.ndim == 2:
-            # Square matrix: assume columns = vectors (V convention, like root cache)
-            if t.shape[0] == t.shape[1]:
-                k = min(self.top_k, t.shape[1])
-                t = t[:, :k].T  # [dim, k] -> [k, dim]
-            elif t.shape[0] > t.shape[1]:
-                # [dim, num_vectors] -> take first top_k columns then transpose
-                k = min(self.top_k, t.shape[1])
-                t = t[:, :k].T
-            else:
-                # [num_vectors, dim] -> rows = vectors
-                k = min(self.top_k, t.shape[0])
-                t = t[:k, :]
-        elif t.ndim == 1:
-            # Single vector: if top_k > 1, we only have one vector
-            if self.top_k > 1:
-                raise ValueError(
-                    f"Requested top_k={self.top_k} but SVD file {filepath} "
-                    "contains only a single vector. Need a matrix with multiple vectors."
-                )
-            # For top_k=1, return as 1D tensor for backward compatibility
-            t = t / (t.norm() + 1e-12)
-            return t
-        
+
+        # Extract tensor from various formats
+        t = self._extract_tensor(obj, filepath)
+        t = torch.as_tensor(t, dtype=torch.float32, device="cpu")
+
+        if t.ndim == 1:
+            return t / (t.norm() + 1e-12)
+
+        # 2-D: columns = vectors for square raw tensors; rows = vectors otherwise
+        t = self._select_top_k(t)
+
         # Normalize each vector
-        norms = t.norm(dim=-1, keepdim=True) + 1e-12
-        t = t / norms
-        
-        # For top_k=1, return as 1D tensor for backward compatibility
-        if self.top_k == 1 and t.shape[0] == 1:
-            return t[0]  # [dim]
-        
-        return t  # [k, dim] for k > 1
+        t = t / (t.norm(dim=-1, keepdim=True) + 1e-12)
+
+        return t[0] if t.shape[0] == 1 else t  # [dim] when top_k=1
+
+    # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _extract_tensor(obj, filepath: str):
+        """Pull out the tensor/array from the pickle object."""
+        if isinstance(obj, dict):
+            for key in ("Vh", "vh", "V", "v"):
+                if key in obj:
+                    return obj[key]
+        if isinstance(obj, (tuple, list)) and len(obj) >= 3:
+            return obj[2]
+        if isinstance(obj, (torch.Tensor,)):
+            return obj
+        # numpy arrays are also acceptable (torch.as_tensor handles them)
+        try:
+            return torch.as_tensor(obj)
+        except Exception:
+            pass
+        raise ValueError(f"Could not extract vector from {filepath}")
+
+    def _select_top_k(self, t: torch.Tensor) -> torch.Tensor:
+        """From a 2-D matrix, return the first top_k vectors as [k, dim].
+
+        Square raw cache: columns = vectors → take first k columns, transpose.
+        Otherwise: rows = vectors → take first k rows.
+        """
+        if t.shape[0] == t.shape[1] or t.shape[0] > t.shape[1]:
+            # columns = vectors
+            k = min(self.top_k, t.shape[1])
+            return t[:, :k].T
+        # rows = vectors
+        k = min(self.top_k, t.shape[0])
+        return t[:k]
+
+    # -- access --------------------------------------------------------------
 
     def __len__(self) -> int:
         return len(self._vectors)
 
-    def __contains__(self, expert_idx: int) -> bool:
-        return expert_idx in self._vectors
-
     def __getitem__(self, expert_idx: int) -> torch.Tensor:
-        """Get vectors for expert. Returns [top_k, dim] tensor if top_k > 1, else [dim] tensor."""
         return self._vectors[expert_idx]
-    
-    def get_single_vector(self, expert_idx: int) -> torch.Tensor:
-        """Get the first (top) vector for an expert. Returns [dim] tensor."""
+
+    def get_single(self, expert_idx: int) -> torch.Tensor:
+        """First (top) vector for an expert, always 1-D [dim]."""
         v = self._vectors[expert_idx]
-        if v.ndim == 2:
-            return v[0]  # [dim]
-        return v  # Already 1D
+        return v[0] if v.ndim == 2 else v
 
     def keys(self) -> Iterator[int]:
         return iter(self._vectors)
@@ -124,157 +126,84 @@ class ExpertVectors:
         return iter(self._vectors.items())
 
 
+# ---------------------------------------------------------------------------
+# Vector interventions
+# ---------------------------------------------------------------------------
+
+def _to_float(x: torch.Tensor) -> torch.Tensor:
+    return x.float() if not x.is_floating_point() else x
+
+
 class VectorIntervention:
-    """Vector operations: random/orthogonal directions, project-out, inject, subtract.
-    Singleton: use VectorIntervention() to get the single shared instance.
-    """
+    """Stateless vector operations for router interventions."""
 
-    _instance: "VectorIntervention | None" = None
-
-    def __new__(cls: type["VectorIntervention"]) -> "VectorIntervention":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    # -- direction generators ------------------------------------------------
 
     @staticmethod
-    def make_orthogonal(v: torch.Tensor, seed: int) -> torch.Tensor:
-        """Return a random unit vector orthogonal to v (Gram–Schmidt)."""
+    def make_random(dim: int, seed: int) -> torch.Tensor:
+        """Random unit vector in R^dim."""
         g = torch.Generator().manual_seed(seed)
-        r = torch.randn(v.shape, generator=g, dtype=v.dtype, device=v.device)
-        r_orth = r - (torch.dot(r, v) * v)
-        return r_orth / (r_orth.norm() + 1e-12)
-
-    @staticmethod
-    def make_orthogonal_to_subspace(vectors: torch.Tensor, seed: int) -> torch.Tensor:
-        """Return a random unit vector orthogonal to the subspace spanned by vectors.
-        vectors: [k, dim]. Returns [dim] unit vector in the orthogonal complement.
-        """
-        if vectors.ndim != 2 or vectors.shape[0] == 0:
-            raise ValueError("vectors must be 2D [k, dim] with k >= 1")
-        dim = vectors.shape[1]
-        g = torch.Generator().manual_seed(seed)
-        r = torch.randn(dim, generator=g, dtype=vectors.dtype, device=vectors.device)
-        r_orth = VectorIntervention.project_out_subspace(r, vectors)
-        n = r_orth.norm()
-        if n < 1e-10:
-            raise RuntimeError(
-                "Random vector lay in the subspace (numerically). Try a different seed."
-            )
-        return r_orth / n
-
-    @staticmethod
-    def make_random(d_dim: int, seed: int) -> torch.Tensor:
-        """Return a random unit vector."""
-        g = torch.Generator().manual_seed(seed)
-        r = torch.randn(d_dim, generator=g)
+        r = torch.randn(dim, generator=g)
         return r / (r.norm() + 1e-12)
 
     @staticmethod
-    def _to_float(x: torch.Tensor) -> torch.Tensor:
-        """Ensure tensor is floating point for norm/division (e.g. quantized gate is int8)."""
-        return x.float() if x.dtype != torch.float32 and x.dtype != torch.float64 else x
+    def make_orthogonal(v: torch.Tensor, seed: int) -> torch.Tensor:
+        """Random unit vector orthogonal to *v* (Gram–Schmidt)."""
+        g = torch.Generator().manual_seed(seed)
+        r = torch.randn(v.shape, generator=g, dtype=v.dtype, device=v.device)
+        r = r - torch.dot(r, v) * v
+        return r / (r.norm() + 1e-12)
+
+    # -- interventions -------------------------------------------------------
 
     @staticmethod
-    def project_out(
-        base_vector: torch.Tensor,
-        remove_vector: torch.Tensor,
-    ) -> torch.Tensor:
-        """Remove the component of base_vector parallel to remove_vector.
-        
-        Args:
-            base_vector: [dim] tensor to project
-            remove_vector: [dim] tensor (single vector) or [k, dim] tensor (multiple vectors)
-        
-        Returns:
-            [dim] tensor with components parallel to remove_vector(s) removed
-        """
-        orig_dtype = base_vector.dtype
-        base_vector = VectorIntervention._to_float(base_vector)
-        remove_vector = remove_vector.to(device=base_vector.device, dtype=base_vector.dtype)
-        if remove_vector.dtype != base_vector.dtype:
-            remove_vector = VectorIntervention._to_float(remove_vector)
+    def project_out(base: torch.Tensor, remove: torch.Tensor) -> torch.Tensor:
+        """Remove the component(s) of *base* parallel to *remove*.
 
-        # Handle both single vector and multiple vectors
-        if remove_vector.ndim == 1:
-            # Single vector: original behavior
-            dot = torch.dot(base_vector, remove_vector)
-            result = base_vector - (dot * remove_vector)
-            return result.to(orig_dtype) if orig_dtype != result.dtype else result
-        elif remove_vector.ndim == 2:
-            # Multiple vectors: project out the subspace
-            result = VectorIntervention.project_out_subspace(base_vector, remove_vector)
-            return result.to(orig_dtype) if orig_dtype != result.dtype else result
+        Args:
+            base: [dim] vector to modify.
+            remove: [dim] single direction **or** [k, dim] subspace basis.
+
+        Returns:
+            [dim] projected vector (same dtype as *base*).
+        """
+        orig_dtype = base.dtype
+        base = _to_float(base)
+        remove = remove.to(device=base.device, dtype=base.dtype)
+
+        if remove.ndim == 1:
+            result = base - torch.dot(base, remove) * remove
+        elif remove.ndim == 2:
+            result = _project_out_subspace(base, remove)
         else:
-            raise ValueError(f"remove_vector must be 1D or 2D, got {remove_vector.ndim}D")
+            raise ValueError(f"remove must be 1-D or 2-D, got {remove.ndim}-D")
+
+        return result.to(orig_dtype)
 
     @staticmethod
-    def project_out_subspace(
-        base_vector: torch.Tensor,
-        remove_vectors: torch.Tensor,
-    ) -> torch.Tensor:
-        """Remove the component of base_vector in the subspace spanned by remove_vectors.
-        
-        Uses Gram-Schmidt orthogonalization to project out the subspace.
-        
-        Args:
-            base_vector: [dim] tensor to project
-            remove_vectors: [k, dim] tensor with k vectors spanning the subspace to remove
-        
-        Returns:
-            [dim] tensor with components in the subspace removed
-        """
-        base_vector = VectorIntervention._to_float(base_vector)
-        remove_vectors = remove_vectors.to(device=base_vector.device, dtype=base_vector.dtype)
-        if not remove_vectors.is_floating_point():
-            remove_vectors = VectorIntervention._to_float(remove_vectors)
-
-        if remove_vectors.ndim != 2:
-            raise ValueError(f"remove_vectors must be 2D [k, dim], got shape {remove_vectors.shape}")
-        
-        # Orthonormalize the remove_vectors using Gram-Schmidt
-        # This ensures we properly project out the subspace even if vectors are not orthogonal
-        result = base_vector.clone()
-        for i in range(remove_vectors.shape[0]):
-            v = remove_vectors[i]
-            # Orthogonalize v against previous vectors
-            for j in range(i):
-                v = v - torch.dot(v, remove_vectors[j]) * remove_vectors[j]
-            # Normalize
-            v_norm = v.norm()
-            if v_norm > 1e-12:
-                v = v / v_norm
-                # Project out this component
-                dot = torch.dot(result, v)
-                result = result - (dot * v)
-        
-        return result
+    def inject(base: torch.Tensor, direction: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+        """base + scale * unit(direction)."""
+        orig_dtype = base.dtype
+        base, direction = _to_float(base), _to_float(direction.to(base.device))
+        return (base + scale * direction / (direction.norm() + 1e-12)).to(orig_dtype)
 
     @staticmethod
-    def inject(
-        base_vector: torch.Tensor,
-        direction: torch.Tensor,
-        scale: float = 1.0,
-    ) -> torch.Tensor:
-        """Add a component along direction: base + scale * unit(direction)."""
-        orig_dtype = base_vector.dtype
-        base_vector = VectorIntervention._to_float(base_vector)
-        direction = direction.to(device=base_vector.device)
-        direction = VectorIntervention._to_float(direction)
-        unit = direction / (direction.norm() + 1e-12)
-        result = base_vector + scale * unit
-        return result.to(orig_dtype) if orig_dtype != result.dtype else result
+    def subtract(base: torch.Tensor, direction: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+        """base − scale * unit(direction)."""
+        orig_dtype = base.dtype
+        base, direction = _to_float(base), _to_float(direction.to(base.device))
+        return (base - scale * direction / (direction.norm() + 1e-12)).to(orig_dtype)
 
-    @staticmethod
-    def subtract(
-        base_vector: torch.Tensor,
-        direction: torch.Tensor,
-        scale: float = 1.0,
-    ) -> torch.Tensor:
-        """Remove a component along direction: base - scale * unit(direction)."""
-        orig_dtype = base_vector.dtype
-        base_vector = VectorIntervention._to_float(base_vector)
-        direction = direction.to(device=base_vector.device)
-        direction = VectorIntervention._to_float(direction)
-        unit = direction / (direction.norm() + 1e-12)
-        result = base_vector - scale * unit
-        return result.to(orig_dtype) if orig_dtype != result.dtype else result
+
+def _project_out_subspace(base: torch.Tensor, vectors: torch.Tensor) -> torch.Tensor:
+    """Project *base* out of the subspace spanned by *vectors* [k, dim] (Gram–Schmidt)."""
+    result = base.clone()
+    for i in range(vectors.shape[0]):
+        v = vectors[i].clone()
+        for j in range(i):
+            v = v - torch.dot(v, vectors[j]) * vectors[j]
+        n = v.norm()
+        if n > 1e-12:
+            v = v / n
+            result = result - torch.dot(result, v) * v
+    return result

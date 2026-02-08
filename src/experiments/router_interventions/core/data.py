@@ -1,4 +1,4 @@
-"""Data loading: abstract batch loader + implementations."""
+"""Batch loaders for evaluation: wikitext, wiki titles, and plain text lists."""
 from __future__ import annotations
 
 import os
@@ -12,237 +12,140 @@ from transformers import AutoTokenizer
 
 
 class BatchLoader(ABC):
-    """Abstract base for loaders that produce batches of token IDs for LM evaluation.
-
-    Each batch is a tensor of shape [batch_size, seq_len] (input_ids; labels = input_ids for causal LM).
-    """
+    """Abstract base: produce [batch_size, seq_len] token-ID batches."""
 
     @abstractmethod
-    def get_batches(self) -> List[torch.Tensor]:
-        """Return a list of batches, each of shape [batch_size, seq_len]."""
-        ...
+    def get_batches(self) -> List[torch.Tensor]: ...
 
 
-def _tokenize_to_batches(
-    tokenizer: AutoTokenizer,
-    texts: List[str],
-    seq_len: int,
-    batch_size: int,
-    max_rows: int | None = None,
-) -> List[torch.Tensor]:
-    """Shared helper: tokenize texts and chunk into fixed-size batches.
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
-    max_rows: If set, use at most this many rows (seq_len-sized segments). Used by WikitextBatchLoader
-    so num_samples caps evaluation samples, not source texts.
-    """
-    if not texts:
-        raise ValueError("No texts to tokenize.")
-    all_ids: List[torch.Tensor] = []
-    for text in texts:
-        enc = tokenizer(
-            text, return_tensors="pt", padding=False, truncation=False
-        )
-        all_ids.append(enc["input_ids"].squeeze(0))
-    ids = torch.cat(all_ids, dim=0)
-    n_tokens = (ids.numel() // seq_len) * seq_len
-    if n_tokens == 0:
-        raise ValueError("Not enough data to create a single batch.")
-    ids = ids[:n_tokens].view(-1, seq_len)
-    if max_rows is not None and ids.size(0) > max_rows:
-        ids = ids[:max_rows]
-    return [
-        ids[i : i + batch_size]
-        for i in range(0, len(ids), batch_size)
-    ]
-
-
-class WikitextBatchLoader(BatchLoader):
-    """Streams Wikipedia (or wikitext-2), tokenizes, and returns fixed-size batches."""
-
-    def __init__(
-        self,
-        tokenizer: AutoTokenizer,
-        num_samples: int = 200,
-        seq_len: int = 512,
-        batch_size: int = 4,
-        min_text_length: int = 100,
-    ) -> None:
-        self.tokenizer = tokenizer
-        self.num_samples = num_samples
-        self.seq_len = seq_len
-        self.batch_size = batch_size
-        self.min_text_length = min_text_length
-        self._cache_dir = self._resolve_cache_dir()
-
-    @staticmethod
-    def _resolve_cache_dir() -> str:
-        if not os.environ.get("HF_DATASETS_CACHE") and not os.environ.get("HF_HOME"):
-            cache_dir = Path.home() / ".cache" / "huggingface" / "datasets"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            os.environ["HF_DATASETS_CACHE"] = str(cache_dir)
-        return os.environ.get("HF_DATASETS_CACHE") or str(
-            Path.home() / ".cache" / "huggingface" / "datasets"
-        )
-
-    def _load_streaming_dataset(self):
-        try:
-            return load_dataset(
-                "wikipedia", "20220301.en",
-                split="train", streaming=True, cache_dir=self._cache_dir,
-            )
-        except Exception:
-            try:
-                return load_dataset(
-                    "wikitext", "wikitext-2-raw-v1",
-                    split="train", streaming=True, cache_dir=self._cache_dir,
-                )
-            except Exception as e:
-                raise RuntimeError(f"Could not load dataset: {e}") from e
-
-    def _collect_texts(self) -> List[str]:
-        ds = self._load_streaming_dataset()
-        texts: List[str] = []
-        for x in ds:
-            if len(texts) >= self.num_samples:
-                break
-            if len(x["text"]) >= self.min_text_length:
-                texts.append(x["text"])
-        return texts
-
-    def get_batches(self) -> List[torch.Tensor]:
-        texts = self._collect_texts()
-        # Cap total rows to num_samples so num_samples = evaluation samples (not source text count)
-        return _tokenize_to_batches(
-            self.tokenizer,
-            texts,
-            self.seq_len,
-            self.batch_size,
-            max_rows=self.num_samples,
-        )
-
-
-def _tokenize_titles_to_batches(
-    tokenizer: AutoTokenizer,
-    titles: List[str],
-    seq_len: int,
-    batch_size: int,
-) -> List[torch.Tensor]:
-    """Tokenize short texts (titles), truncate/pad each to seq_len, then batch. Like gate-hook."""
-    if not titles:
-        raise ValueError("No titles to tokenize.")
-    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-    all_ids: List[torch.Tensor] = []
-    for text in titles:
-        enc = tokenizer(
-            text,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=seq_len,
-        )
-        all_ids.append(enc["input_ids"].squeeze(0))
-    ids = torch.stack(all_ids)
-    return [
-        ids[i : i + batch_size]
-        for i in range(0, len(ids), batch_size)
-    ]
-
-
-def _resolve_cache_dir_static() -> str:
+def _hf_cache_dir() -> str:
+    """Ensure HF dataset cache dir exists and return its path."""
     if not os.environ.get("HF_DATASETS_CACHE") and not os.environ.get("HF_HOME"):
-        cache_dir = Path.home() / ".cache" / "huggingface" / "datasets"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        os.environ["HF_DATASETS_CACHE"] = str(cache_dir)
+        d = Path.home() / ".cache" / "huggingface" / "datasets"
+        d.mkdir(parents=True, exist_ok=True)
+        os.environ["HF_DATASETS_CACHE"] = str(d)
     return os.environ.get("HF_DATASETS_CACHE") or str(
         Path.home() / ".cache" / "huggingface" / "datasets"
     )
 
 
-class WikiTitlesBatchLoader(BatchLoader):
-    """Loads Wikipedia (or Wikitext) titles — short strings, seq_len=32 — like gate-hook. Enables large batch sizes."""
+def _chunk_to_batches(ids: torch.Tensor, seq_len: int, batch_size: int,
+                      max_rows: int | None = None) -> List[torch.Tensor]:
+    """Reshape flat token IDs into [batch_size, seq_len] batches."""
+    n = (ids.numel() // seq_len) * seq_len
+    if n == 0:
+        raise ValueError("Not enough tokens for a single batch")
+    rows = ids[:n].view(-1, seq_len)
+    if max_rows is not None:
+        rows = rows[:max_rows]
+    return [rows[i:i + batch_size] for i in range(0, len(rows), batch_size)]
 
-    def __init__(
-        self,
-        tokenizer: AutoTokenizer,
-        num_samples: int = 500,
-        seq_len: int = 32,
-        batch_size: int = 64,
-        cache_dir: str | None = None,
-    ) -> None:
+
+# ---------------------------------------------------------------------------
+# Wikitext (long passages)
+# ---------------------------------------------------------------------------
+
+class WikitextBatchLoader(BatchLoader):
+    """Wikipedia / wikitext-2 passages, tokenized into fixed-length chunks."""
+
+    def __init__(self, tokenizer: AutoTokenizer, num_samples: int = 200,
+                 seq_len: int = 512, batch_size: int = 4, min_len: int = 100) -> None:
         self.tokenizer = tokenizer
         self.num_samples = num_samples
         self.seq_len = seq_len
         self.batch_size = batch_size
-        self._cache_dir = cache_dir or _resolve_cache_dir_static()
+        self.min_len = min_len
+        self._cache = _hf_cache_dir()
 
-    def _load_titles(self) -> List[str]:
-        for config_name in ("20220301.en", "20231101.en"):
+    def get_batches(self) -> List[torch.Tensor]:
+        texts = self._collect()
+        ids = torch.cat([
+            self.tokenizer(t, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
+            for t in texts
+        ])
+        return _chunk_to_batches(ids, self.seq_len, self.batch_size, max_rows=self.num_samples)
+
+    def _collect(self) -> List[str]:
+        for name, cfg in [("wikipedia", "20220301.en"), ("wikitext", "wikitext-2-raw-v1")]:
             try:
-                ds = load_dataset(
-                    "wikimedia/wikipedia",
-                    config_name,
-                    split="train",
-                    streaming=True,
-                    cache_dir=self._cache_dir,
-                    trust_remote_code=True,
-                )
-                titles: List[str] = []
-                for i, x in enumerate(ds):
-                    if i >= self.num_samples:
+                ds = load_dataset(name, cfg, split="train", streaming=True, cache_dir=self._cache)
+                return [x["text"] for x, _ in zip(ds, range(self.num_samples)) if len(x["text"]) >= self.min_len]
+            except Exception:
+                continue
+        raise RuntimeError("Could not load wikitext dataset")
+
+
+# ---------------------------------------------------------------------------
+# Wiki titles (short strings, pad to seq_len)
+# ---------------------------------------------------------------------------
+
+class WikiTitlesBatchLoader(BatchLoader):
+    """Short Wikipedia titles padded to seq_len (like gate-hook experiments)."""
+
+    def __init__(self, tokenizer: AutoTokenizer, num_samples: int = 500,
+                 seq_len: int = 32, batch_size: int = 64) -> None:
+        self.tokenizer = tokenizer
+        self.num_samples = num_samples
+        self.seq_len = seq_len
+        self.batch_size = batch_size
+        self._cache = _hf_cache_dir()
+
+    def get_batches(self) -> List[torch.Tensor]:
+        titles = self._load()
+        self.tokenizer.pad_token = self.tokenizer.pad_token or self.tokenizer.eos_token
+        rows = torch.stack([
+            self.tokenizer(t, return_tensors="pt", padding="max_length",
+                           truncation=True, max_length=self.seq_len)["input_ids"].squeeze(0)
+            for t in titles
+        ])
+        return [rows[i:i + self.batch_size] for i in range(0, len(rows), self.batch_size)]
+
+    def _load(self) -> List[str]:
+        for cfg in ("20220301.en", "20231101.en"):
+            try:
+                ds = load_dataset("wikimedia/wikipedia", cfg, split="train",
+                                  streaming=True, cache_dir=self._cache, trust_remote_code=True)
+                titles = []
+                for x in ds:
+                    if len(titles) >= self.num_samples:
                         break
-                    t = x.get("title") or (x.get("text") or "")[:80]
-                    if isinstance(t, str) and t.strip():
-                        titles.append(t.strip())
+                    t = (x.get("title") or (x.get("text") or "")[:80]).strip()
+                    if t:
+                        titles.append(t)
                 if titles:
                     return titles
             except Exception:
                 continue
-        try:
-            ds = load_dataset(
-                "wikitext",
-                "wikitext-2-raw-v1",
-                split="train",
-                cache_dir=self._cache_dir,
-            )
-            titles = []
-            for row in ds:
-                if len(titles) >= self.num_samples:
-                    break
-                line = (row.get("text") or "").strip()
-                if line and not line.startswith("=") and len(line) < 200:
-                    titles.append(line)
-            if titles:
-                return titles
-        except Exception:
-            pass
-        raise RuntimeError(
-            "Could not load wiki_titles: tried wikimedia/wikipedia and wikitext. "
-            "Install datasets and check network."
-        )
+        # Fall back to wikitext short lines
+        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", cache_dir=self._cache)
+        titles = [r["text"].strip() for r in ds
+                  if r["text"].strip() and not r["text"].startswith("=") and len(r["text"]) < 200]
+        if not titles:
+            raise RuntimeError("Could not load wiki titles from any source")
+        return titles[:self.num_samples]
 
-    def get_batches(self) -> List[torch.Tensor]:
-        titles = self._load_titles()
-        return _tokenize_titles_to_batches(
-            self.tokenizer, titles, self.seq_len, self.batch_size
-        )
 
+# ---------------------------------------------------------------------------
+# Plain text list
+# ---------------------------------------------------------------------------
 
 class TextListBatchLoader(BatchLoader):
-    """Builds batches from an explicit list of text strings (e.g. eval set or custom corpus)."""
+    """Fixed list of texts, tokenized into chunks."""
 
-    def __init__(
-        self,
-        tokenizer: AutoTokenizer,
-        texts: List[str],
-        seq_len: int = 512,
-        batch_size: int = 4,
-    ) -> None:
+    def __init__(self, tokenizer: AutoTokenizer, texts: List[str],
+                 seq_len: int = 512, batch_size: int = 4) -> None:
         self.tokenizer = tokenizer
         self.texts = texts
         self.seq_len = seq_len
         self.batch_size = batch_size
 
     def get_batches(self) -> List[torch.Tensor]:
-        return _tokenize_to_batches(
-            self.tokenizer, self.texts, self.seq_len, self.batch_size
-        )
+        ids = torch.cat([
+            self.tokenizer(t, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
+            for t in self.texts
+        ])
+        return _chunk_to_batches(ids, self.seq_len, self.batch_size)
