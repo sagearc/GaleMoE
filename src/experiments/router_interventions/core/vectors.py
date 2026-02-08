@@ -147,6 +147,22 @@ class VectorIntervention:
         return r / (r.norm() + 1e-12)
 
     @staticmethod
+    def make_random_in_span(vectors: torch.Tensor, seed: int) -> torch.Tensor:
+        """Random unit vector in the span of *vectors* (same SVD rank).
+
+        vectors: [k, dim] (rows = basis) or [dim] (single direction).
+        Returns a random unit vector in span(vectors), so the comparison with
+        SVD is fair: we remove a random direction in the same subspace.
+        """
+        g = torch.Generator().manual_seed(seed)
+        if vectors.ndim == 1:
+            vectors = vectors.unsqueeze(0)
+        k, dim = vectors.shape
+        coeffs = torch.randn(k, generator=g, dtype=vectors.dtype, device=vectors.device)
+        r = (coeffs.unsqueeze(0) @ vectors).squeeze(0)
+        return r / (r.norm() + 1e-12)
+
+    @staticmethod
     def make_orthogonal(v: torch.Tensor, seed: int) -> torch.Tensor:
         """Random unit vector orthogonal to *v* (Gram–Schmidt)."""
         g = torch.Generator().manual_seed(seed)

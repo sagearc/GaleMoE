@@ -31,17 +31,16 @@ def load_results(filepath: str | Path) -> Dict[str, Any]:
         data = json.load(f)
     
     # Backward compatibility: if using old format (k-independent stored redundantly),
-    # normalize to new format with k_independent section
+    # normalize to new format with k_independent section.
+    # Only zero, shuffle, orthogonal are k-independent; random is per-k in by_k.
     if "k_independent" not in data and "by_k" in data:
-        # Extract k-independent variants from the first k entry
         first_k = next(iter(data["by_k"].values()), {})
         k_independent = {}
-        for variant in ["zero", "shuffle", "random", "orthogonal"]:
+        for variant in ["zero", "shuffle", "orthogonal"]:
             if variant in first_k:
                 k_independent[variant] = first_k[variant]
         if k_independent:
             data["k_independent"] = k_independent
-            # Remove from all by_k entries to clean up
             for k_entry in data["by_k"].values():
                 for variant in k_independent:
                     k_entry.pop(variant, None)
