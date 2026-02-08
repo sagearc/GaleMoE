@@ -19,15 +19,13 @@ class ExperimentConfig:
     model_id: str = "mistralai/Mixtral-8x7B-v0.1"
     model_tag: str = "mistralai_Mixtral_8x7B_v0.1"
     output_file: str = "results_project_out.json"
-    num_samples: int = 200
-    seq_len: int = 512
-    batch_size: int = 4
+    output_dir: str | None = None  # If set, save to output_dir with indicative filename
+    num_samples: int = 500
+    seq_len: int = 32
+    batch_size: int = 64
     seed: int = 42
     variations: Sequence[str] = ("svd", "orthogonal", "random", "zero", "shuffle")
-    dataset: str = "wikitext"
+    dataset: str = "wiki_titles"
     text_file: str | None = None
     top_k: Sequence[int] = (1,)
-    use_single_device: bool = False  # If True, load with device_map=None to avoid meta tensors
-    target_layer_only_gpu: bool = False  # If True, put only layer_idx on GPU, rest on CPU
-    num_layers: int = 32  # Total layers in model (for device_map building)
     quantization: str | None = None  # None, "8bit", or "4bit" for memory reduction

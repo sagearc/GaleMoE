@@ -8,25 +8,29 @@ import torch.nn.functional as F
 
 
 class LossEvaluator:
-    """Evaluates mean causal LM loss over batches (labels = input_ids)."""
+    """Evaluates mean causal LM loss over batches (labels = input_ids). Padding positions are ignored when pad_token_id is set."""
 
-    def __init__(self, model: torch.nn.Module) -> None:
+    def __init__(self, model: torch.nn.Module, pad_token_id: int | None = None) -> None:
         self.model = model
         self._device = next(model.parameters()).device
+        self.pad_token_id = pad_token_id
 
     @torch.no_grad()
     def evaluate(self, batches: List[torch.Tensor]) -> float:
-        """Return mean loss over the given batches.
+        """Return mean loss over the given batches (non-padding positions only when pad_token_id is set).
         
         Batches may be on CPU or GPU. Moves to device as needed.
+        When pad_token_id is set (e.g. for wiki_titles), labels at padding positions are set to -100 so the loss ignores them.
         """
         self.model.eval()
         losses: List[float] = []
         for batch in batches:
-            # Move to device if needed (handles both pre-moved and lazy cases)
             if batch.device != self._device:
                 batch = batch.to(self._device)
-            out = self.model(input_ids=batch, labels=batch)
+            labels = batch.clone()
+            if self.pad_token_id is not None:
+                labels[batch == self.pad_token_id] = -100
+            out = self.model(input_ids=batch, labels=labels)
             losses.append(out.loss.item())
         return sum(losses) / len(losses) if losses else 0.0
 

@@ -1,11 +1,14 @@
 """Vector utilities: load SVD vectors, project out / inject / subtract directions."""
 from __future__ import annotations
 
+import logging
 import os
 import pickle
 from typing import Dict, Iterator
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class ExpertVectors:
@@ -29,8 +32,14 @@ class ExpertVectors:
     def load(self) -> None:
         """Load all expert vectors from svd_dir; raise if any file is missing."""
         self._vectors.clear()
+        paths = [self._path_for_expert(i) for i in range(self.num_experts)]
+        logger.info(
+            "Loading SVD from %s: %s",
+            os.path.abspath(self.svd_dir),
+            ", ".join(os.path.basename(p) for p in paths),
+        )
         for i in range(self.num_experts):
-            path = self._path_for_expert(i)
+            path = paths[i]
             self._vectors[i] = self._load_single(path)
 
     def _path_for_expert(self, expert_idx: int) -> str:
@@ -56,18 +65,20 @@ class ExpertVectors:
             raise ValueError(f"Could not extract vector from {filepath}")
         t = torch.as_tensor(tensor, dtype=torch.float32, device="cpu")
         
-        # Handle 2D matrices (Vh/V matrices with multiple singular vectors)
+        # Handle 2D matrices
         if t.ndim == 2:
-            # If rows > cols, take first top_k columns; otherwise take first top_k rows
-            if t.shape[0] > t.shape[1]:
-                # Shape: [dim, num_vectors] -> take first top_k columns
+            # Square matrix: assume columns = vectors (V convention, like root cache)
+            if t.shape[0] == t.shape[1]:
                 k = min(self.top_k, t.shape[1])
-                t = t[:, :k]  # [dim, k]
-                t = t.T  # [k, dim] for consistency
+                t = t[:, :k].T  # [dim, k] -> [k, dim]
+            elif t.shape[0] > t.shape[1]:
+                # [dim, num_vectors] -> take first top_k columns then transpose
+                k = min(self.top_k, t.shape[1])
+                t = t[:, :k].T
             else:
-                # Shape: [num_vectors, dim] -> take first top_k rows
+                # [num_vectors, dim] -> rows = vectors
                 k = min(self.top_k, t.shape[0])
-                t = t[:k, :]  # [k, dim]
+                t = t[:k, :]
         elif t.ndim == 1:
             # Single vector: if top_k > 1, we only have one vector
             if self.top_k > 1:
@@ -159,6 +170,11 @@ class VectorIntervention:
         return r / (r.norm() + 1e-12)
 
     @staticmethod
+    def _to_float(x: torch.Tensor) -> torch.Tensor:
+        """Ensure tensor is floating point for norm/division (e.g. quantized gate is int8)."""
+        return x.float() if x.dtype != torch.float32 and x.dtype != torch.float64 else x
+
+    @staticmethod
     def project_out(
         base_vector: torch.Tensor,
         remove_vector: torch.Tensor,
@@ -172,22 +188,25 @@ class VectorIntervention:
         Returns:
             [dim] tensor with components parallel to remove_vector(s) removed
         """
-        if base_vector.device != remove_vector.device or base_vector.dtype != remove_vector.dtype:
-            remove_vector = remove_vector.to(
-                base_vector.device, dtype=base_vector.dtype
-            )
-        
+        orig_dtype = base_vector.dtype
+        base_vector = VectorIntervention._to_float(base_vector)
+        remove_vector = remove_vector.to(device=base_vector.device, dtype=base_vector.dtype)
+        if remove_vector.dtype != base_vector.dtype:
+            remove_vector = VectorIntervention._to_float(remove_vector)
+
         # Handle both single vector and multiple vectors
         if remove_vector.ndim == 1:
             # Single vector: original behavior
             dot = torch.dot(base_vector, remove_vector)
-            return base_vector - (dot * remove_vector)
+            result = base_vector - (dot * remove_vector)
+            return result.to(orig_dtype) if orig_dtype != result.dtype else result
         elif remove_vector.ndim == 2:
             # Multiple vectors: project out the subspace
-            return VectorIntervention.project_out_subspace(base_vector, remove_vector)
+            result = VectorIntervention.project_out_subspace(base_vector, remove_vector)
+            return result.to(orig_dtype) if orig_dtype != result.dtype else result
         else:
             raise ValueError(f"remove_vector must be 1D or 2D, got {remove_vector.ndim}D")
-    
+
     @staticmethod
     def project_out_subspace(
         base_vector: torch.Tensor,
@@ -204,11 +223,11 @@ class VectorIntervention:
         Returns:
             [dim] tensor with components in the subspace removed
         """
-        if base_vector.device != remove_vectors.device or base_vector.dtype != remove_vectors.dtype:
-            remove_vectors = remove_vectors.to(
-                base_vector.device, dtype=base_vector.dtype
-            )
-        
+        base_vector = VectorIntervention._to_float(base_vector)
+        remove_vectors = remove_vectors.to(device=base_vector.device, dtype=base_vector.dtype)
+        if not remove_vectors.is_floating_point():
+            remove_vectors = VectorIntervention._to_float(remove_vectors)
+
         if remove_vectors.ndim != 2:
             raise ValueError(f"remove_vectors must be 2D [k, dim], got shape {remove_vectors.shape}")
         
@@ -237,12 +256,13 @@ class VectorIntervention:
         scale: float = 1.0,
     ) -> torch.Tensor:
         """Add a component along direction: base + scale * unit(direction)."""
-        if base_vector.device != direction.device:
-            direction = direction.to(
-                base_vector.device, dtype=base_vector.dtype
-            )
+        orig_dtype = base_vector.dtype
+        base_vector = VectorIntervention._to_float(base_vector)
+        direction = direction.to(device=base_vector.device)
+        direction = VectorIntervention._to_float(direction)
         unit = direction / (direction.norm() + 1e-12)
-        return base_vector + scale * unit
+        result = base_vector + scale * unit
+        return result.to(orig_dtype) if orig_dtype != result.dtype else result
 
     @staticmethod
     def subtract(
@@ -251,9 +271,10 @@ class VectorIntervention:
         scale: float = 1.0,
     ) -> torch.Tensor:
         """Remove a component along direction: base - scale * unit(direction)."""
-        if base_vector.device != direction.device:
-            direction = direction.to(
-                base_vector.device, dtype=base_vector.dtype
-            )
+        orig_dtype = base_vector.dtype
+        base_vector = VectorIntervention._to_float(base_vector)
+        direction = direction.to(device=base_vector.device)
+        direction = VectorIntervention._to_float(direction)
         unit = direction / (direction.norm() + 1e-12)
-        return base_vector - scale * unit
+        result = base_vector - scale * unit
+        return result.to(orig_dtype) if orig_dtype != result.dtype else result

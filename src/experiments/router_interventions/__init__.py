@@ -35,6 +35,8 @@ from .viz import (
     plot_ablation_results,
     plot_confusion_heatmap,
     plot_confusion_from_results,
+    plot_delta_vs_k,
+    plot_delta_vs_layers,
 )
 
 __all__ = [
@@ -53,5 +55,7 @@ __all__ = [
     "plot_ablation_results",
     "plot_confusion_heatmap",
     "plot_confusion_from_results",
+    "plot_delta_vs_k",
+    "plot_delta_vs_layers",
     "run_vector_intervention_experiment",
 ]

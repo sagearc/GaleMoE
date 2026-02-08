@@ -1,7 +1,6 @@
 """Core building blocks: config, data, evaluation, router manager, vectors."""
 from .config import ExperimentConfig
-from .data import BatchLoader, TextListBatchLoader, WikitextBatchLoader
-from .device_mapper import DeviceMapBuilder
+from .data import BatchLoader, TextListBatchLoader, WikitextBatchLoader, WikiTitlesBatchLoader
 from .evaluation import (
     LossEvaluator,
     TokenDistributionComparator,
@@ -17,13 +16,13 @@ __all__ = [
     "BatchLoader",
     "TextListBatchLoader",
     "WikitextBatchLoader",
+    "WikiTitlesBatchLoader",
     "LossEvaluator",
     "TokenDistributionComparator",
     "confusion_matrix_top_k",
     "RouterManager",
     "ExpertVectors",
     "VectorIntervention",
-    "DeviceMapBuilder",
     "ModelLoader",
     "load_model_and_tokenizer",
     "Timer",

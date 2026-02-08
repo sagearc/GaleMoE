@@ -160,6 +160,143 @@ def plot_confusion_heatmap(
     return fig
 
 
+def plot_delta_vs_layers(
+    results_list: List[Dict[str, Any]],
+    k: int,
+    *,
+    variants: Optional[List[str]] = None,
+    title: Optional[str] = None,
+    figsize: tuple[float, float] = (8, 5),
+    ax: Optional[plt.Axes] = None,
+) -> plt.Figure:
+    """Plot loss delta vs layer index for a specific k (one line per variant).
+
+    Use when you have one result file per layer (e.g. from multiple runs with --output-dir).
+    Each result must have config.layer_idx and by_k (with key k).
+
+    Args:
+        results_list: List of loaded result dicts (one per layer).
+        k: Which top_k value to use (must exist in each result's by_k).
+        variants: Which variants to plot (default: all in by_k[k]).
+        title: Plot title (default: "Loss Δ vs layer (k={k})").
+        figsize: Figure size when ax is None.
+        ax: Optional axes to plot on.
+
+    Returns:
+        The matplotlib Figure.
+    """
+    # Collect (layer_idx, variant -> delta) from each result
+    by_layer: Dict[int, Dict[str, float]] = {}
+    for res in results_list:
+        cfg = res.get("config", {})
+        layer_idx = cfg.get("layer_idx", len(by_layer))
+        by_k = res.get("by_k", res.get("results", {}))
+        # by_k keys can be int or str in JSON
+        k_key = next((key for key in by_k if int(key) == k), None)
+        if k_key is None:
+            continue
+        entry = by_k[k_key]
+        if not isinstance(entry, dict):
+            continue
+        by_layer[layer_idx] = {
+            v: entry[v]["delta"] for v in entry
+            if isinstance(entry.get(v), dict) and "delta" in entry[v]
+        }
+    if not by_layer:
+        raise ValueError(f"No results found with by_k[{k}]. Check that each file has by_k and key {k}.")
+    layers = sorted(by_layer.keys())
+    all_variants = set()
+    for vmap in by_layer.values():
+        all_variants.update(vmap.keys())
+    if variants is None:
+        variants = sorted(all_variants)
+    else:
+        variants = [v for v in variants if v in all_variants]
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(variants), 1)))
+    for i, var in enumerate(variants):
+        deltas = [by_layer[l].get(var) for l in layers]
+        if any(d is None for d in deltas):
+            continue
+        ax.plot(layers, deltas, "o-", label=var.replace("_", " ").title(), color=colors[i % len(colors)])
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Loss Δ (vs baseline)")
+    ax.set_title(title or f"Loss Δ vs layer (k={k})")
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    return fig
+
+
+def plot_delta_vs_k(
+    results: Dict[str, Any],
+    *,
+    variants: Optional[List[str]] = None,
+    title: Optional[str] = None,
+    figsize: tuple[float, float] = (8, 5),
+    ax: Optional[plt.Axes] = None,
+) -> plt.Figure:
+    """Plot loss delta vs k for a specific layer (one line per variant).
+
+    Use when you have one result file with by_k (multiple k values for one layer).
+
+    Args:
+        results: Loaded result dict with by_k (keys = k values).
+        variants: Which variants to plot (default: all in first by_k entry).
+        title: Plot title (default: "Loss Δ vs k (layer {layer_idx})").
+        figsize: Figure size when ax is None.
+        ax: Optional axes to plot on.
+
+    Returns:
+        The matplotlib Figure.
+    """
+    by_k = results.get("by_k", {})
+    if not by_k:
+        raise ValueError("results has no 'by_k'. Run with multiple --top-k values.")
+    layer_idx = results.get("config", {}).get("layer_idx", "?")
+    # Sort k numerically (keys may be int or str)
+    k_vals = sorted([int(key) for key in by_k])
+    first_entry = by_k.get(str(k_vals[0]), by_k.get(k_vals[0], {}))
+    if not isinstance(first_entry, dict):
+        all_variants = []
+    else:
+        all_variants = sorted([
+            v for v in first_entry
+            if isinstance(first_entry.get(v), dict) and "delta" in first_entry[v]
+        ])
+    if variants is None:
+        variants = all_variants
+    else:
+        variants = [v for v in variants if v in all_variants]
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(variants), 1)))
+    for i, var in enumerate(variants):
+        deltas = []
+        for k in k_vals:
+            entry = by_k.get(str(k), by_k.get(k, {}))
+            if isinstance(entry, dict) and var in entry and isinstance(entry[var], dict) and "delta" in entry[var]:
+                deltas.append(entry[var]["delta"])
+            else:
+                deltas.append(None)
+        if all(d is not None for d in deltas):
+            ax.plot(k_vals, deltas, "o-", label=var.replace("_", " ").title(), color=colors[i % len(colors)])
+    ax.set_xlabel("k (top singular vectors projected out)")
+    ax.set_ylabel("Loss Δ (vs baseline)")
+    ax.set_title(title or f"Loss Δ vs k (layer {layer_idx})")
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    return fig
+
+
 def plot_confusion_from_results(
     results: Dict[str, Any],
     variant_key: str,

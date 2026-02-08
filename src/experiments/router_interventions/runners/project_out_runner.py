@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -20,13 +21,53 @@ from ..core import (
     Timer,
     timer,
 )
-from ..core.data import TextListBatchLoader, WikitextBatchLoader
+from ..core.data import TextListBatchLoader, WikitextBatchLoader, WikiTitlesBatchLoader
 from ..core.memory import log_gpu_memory
 
 logger = logging.getLogger(__name__)
 
 VALID_VARIATIONS = ("svd", "orthogonal", "random", "zero", "shuffle")
 PROJECT_OUT_VARIATIONS = ("svd", "orthogonal", "random")  # require expert vectors
+
+
+def _run_svd_sanity_check(router: RouterManager, expert_vectors: ExpertVectors, intervention: VectorIntervention) -> None:
+    """Verify project-out math and SVD alignment with the gate (log diagnostics)."""
+    orig = router.original_weights
+    exp_idx = 0
+    row = orig[exp_idx].float()
+    row_norm = row.norm().item() + 1e-12
+    # 1) Project out the normalized row from itself -> should give ~0
+    row_unit = row / row_norm
+    projected_self = intervention.project_out(row, row_unit)
+    ratio_self = (projected_self.norm().item() + 1e-12) / row_norm
+    logger.info(
+        "SVD sanity (project-out self): expert %d, ||projected||/||row|| = %.6f (expect ~0)",
+        exp_idx,
+        ratio_self,
+    )
+    if ratio_self > 0.01:
+        logger.warning(
+            "Project-out of self gave ratio %.4f; expected ~0. Check project_out logic.",
+            ratio_self,
+        )
+    # 2) Project out the loaded SVD direction from the row
+    v_svd = expert_vectors.get_single_vector(exp_idx)
+    if v_svd.dim() == 2:
+        v_svd = v_svd[0]
+    v_svd = v_svd.to(device=row.device, dtype=row.dtype)
+    projected_svd = intervention.project_out(row, v_svd)
+    ratio_svd = (projected_svd.norm().item() + 1e-12) / row_norm
+    logger.info(
+        "SVD sanity (loaded SVD): expert %d, ||projected||/||row|| = %.6f (expect ~0 if SVD matches this gate)",
+        exp_idx,
+        ratio_svd,
+    )
+    if ratio_svd > 0.5:
+        logger.warning(
+            "Loaded SVD direction does not align with gate row (ratio=%.4f). "
+            "Use run_svd_from_expert with same model/layer to generate matching SVD.",
+            ratio_svd,
+        )
 
 
 class ProjectOutRunner:
@@ -43,6 +84,13 @@ class ProjectOutRunner:
     def _make_batch_loader(self, tokenizer) -> BatchLoader:
         if self.config.dataset == "wikitext":
             return WikitextBatchLoader(
+                tokenizer,
+                num_samples=self.config.num_samples,
+                seq_len=self.config.seq_len,
+                batch_size=self.config.batch_size,
+            )
+        if self.config.dataset == "wiki_titles":
+            return WikiTitlesBatchLoader(
                 tokenizer,
                 num_samples=self.config.num_samples,
                 seq_len=self.config.seq_len,
@@ -97,6 +145,18 @@ class ProjectOutRunner:
         # variant == "random"
         return intervention.make_random(v_first.shape[0], seed=seed)
 
+    @staticmethod
+    def _vectors_for_k(
+        v_svd_full: torch.Tensor, top_k: int
+    ) -> torch.Tensor:
+        """Return [top_k, dim] or [dim] from expert vectors. Single place for [1,dim] -> [dim] handling."""
+        if v_svd_full.ndim == 2:
+            v = v_svd_full[:top_k]
+            if v.shape[0] == 1:
+                return v[0]
+            return v
+        return v_svd_full
+
     def _k_values_to_run(self) -> list[int]:
         """Return list of top_k values to run."""
         return list(self.config.top_k)
@@ -129,6 +189,14 @@ class ProjectOutRunner:
             # For quantized models, keep batches on CPU to save memory
             # For non-quantized, pre-move to device if enough memory
             device = next(model.parameters()).device
+            batch_size_actual = batches[0].shape[0] if batches else 0
+            total_samples = len(batches) * batch_size_actual
+            logger.info(
+                "Batches: %d × batch_size=%d → %d samples (tune --batch-size for speed vs memory)",
+                len(batches),
+                batch_size_actual,
+                total_samples,
+            )
             if self.config.quantization:
                 logger.info("Keeping %d batches on CPU (quantized model)", len(batches))
             elif torch.cuda.is_available():
@@ -153,7 +221,10 @@ class ProjectOutRunner:
                 _ = model(first_batch.to(device))
         log_gpu_memory("After first forward (batches loaded)")
 
-        evaluator = LossEvaluator(model)
+        pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_token_id is None and getattr(tokenizer, "eos_token_id", None) is not None:
+            pad_token_id = tokenizer.eos_token_id
+        evaluator = LossEvaluator(model, pad_token_id=pad_token_id)
         k_values = self._k_values_to_run()
         multi_k = len(k_values) > 1
 
@@ -177,7 +248,22 @@ class ProjectOutRunner:
                 logger.info("Evaluating baseline...")
                 base_loss = evaluator.evaluate(batches)
                 results["baseline_loss"] = base_loss
-                logger.info("Baseline loss: %.4f", base_loss)
+                perplexity = math.exp(min(base_loss, 20.0))
+                num_samples_eval = sum(b.size(0) for b in batches)
+                logger.info(
+                    "Baseline loss: %.4f (perplexity %.1f)",
+                    base_loss,
+                    perplexity,
+                )
+                logger.info(
+                    "Throughput: %d samples in baseline eval (use with timing to compare --batch-size)",
+                    num_samples_eval,
+                )
+                if self.config.dataset == "wiki_titles":
+                    logger.info(
+                        "Note: wiki_titles uses short padded sequences (loss over few tokens); "
+                        "use --dataset wikitext for a lower, more natural baseline."
+                    )
 
             orig = router.original_weights
             logger.info("Router weights shape: %s, dtype: %s", orig.shape, orig.dtype)
@@ -238,6 +324,42 @@ class ProjectOutRunner:
                     "No SVD vectors loaded. Check svd_dir and file names."
                 )
 
+            # Sanity check: project-out should zero the row when direction = normalized row
+            _run_svd_sanity_check(router, expert_vectors, intervention)
+
+            # Cache first vector per expert (used by random/orthogonal and by SVD when top_k==1)
+            first_vector_cache = {
+                exp_idx: self._vectors_for_k(v, 1)
+                for exp_idx, v in expert_vectors.items()
+            }
+
+            # Random and orthogonal don't depend on k (same direction for all k); compute once
+            for variant in ("random", "orthogonal"):
+                if variant not in self.config.variations or variant in baseline_interventions:
+                    continue
+                with timer(f"Intervention {variant} (once, k-independent)"):
+                    logger.info("Computing: %s (once, reused for all k)", variant.upper())
+                    modified = router.original_weights.clone()
+                    for exp_idx, v_svd_full in expert_vectors.items():
+                        v_first = first_vector_cache[exp_idx]
+                        v_remove = self._get_remove_vector(
+                            variant, v_first, exp_idx, intervention
+                        )
+                        row = modified[exp_idx]
+                        modified[exp_idx] = intervention.project_out(row, v_remove)
+                    router.apply_weights(modified)
+                    loss = evaluator.evaluate(batches)
+                    baseline_interventions[variant] = {
+                        "loss": loss,
+                        "delta": loss - base_loss,
+                    }
+                    logger.info(
+                        "  → loss=%.4f, delta=%+.4f",
+                        baseline_interventions[variant]["loss"],
+                        baseline_interventions[variant]["delta"],
+                    )
+                    router.restore()
+
             for top_k in k_values:
                 if multi_k:
                     logger.info("\n=== Running interventions with top_k=%d ===", top_k)
@@ -269,13 +391,11 @@ class ProjectOutRunner:
                                 )
 
                             for exp_idx, v_svd_full in expert_vectors.items():
-                                # Use first top_k vectors (slice of pre-loaded max_k vectors)
-                                if v_svd_full.ndim == 2:
-                                    v_svd = v_svd_full[:top_k]  # [k, dim]
-                                    if v_svd.shape[0] == 1:
-                                        v_svd = v_svd[0]  # [dim] for project_out compat
-                                else:
-                                    v_svd = v_svd_full
+                                v_svd = (
+                                    first_vector_cache[exp_idx]
+                                    if top_k == 1
+                                    else self._vectors_for_k(v_svd_full, top_k)
+                                )
                                 v_remove = self._get_remove_vector(
                                     variant, v_svd, exp_idx, intervention
                                 )
@@ -321,9 +441,19 @@ class ProjectOutRunner:
 
         return results
 
+    def _indicative_basename(self) -> str:
+        """Indicative filename (no extension) for this run: layer, k, dataset, quantization."""
+        k_part = "-".join(str(k) for k in self.config.top_k)
+        q = (self.config.quantization or "none").lower()
+        return f"project_out_L{self.config.layer_idx}_k{k_part}_{self.config.dataset}_q{q}"
+
     def _save_results(self, results: Dict[str, Any]) -> None:
-        out_path = Path(self.config.output_file)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.config.output_dir:
+            out_path = Path(self.config.output_dir) / f"{self._indicative_basename()}.json"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            out_path = Path(self.config.output_file)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info("Saving results to %s", out_path)
         with open(out_path, "w") as f:
             json.dump(results, f, indent=2)

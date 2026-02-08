@@ -58,7 +58,17 @@ These experiments modify router (gate) weights (project out directions, zero, sh
    - `{model_tag}_layer{layer_idx}_expert{expert_idx}.pkl`
    - Example: `mistralai_Mixtral_8x7B_v0.1_layer0_expert0.pkl` … `expert7.pkl` for layer 0.
    - Each file can hold a single vector or a matrix (multiple vectors); the code uses `top_k` to take the first `k` vectors.
-3. **GPU** – Mixtral-8x7B in bfloat16 is ~92 GiB. Default loading uses `device_map="auto"` so the model can span multiple GPUs or CPU offload. A single 44 GiB GPU is **not** enough for the full model on one device; do **not** use `--use-single-device` unless you have one very large GPU (e.g. 80 GiB+). Use `--target-layer-only-gpu` to put only the target layer on GPU and save memory.
+   - **From expert w1 (SVD):** We compute SVD of each model’s expert w1; project-out is then applied on the router (gate) vector. Use `run_svd_from_expert` with the same loading as project-out:
+     ```bash
+     # Float model (writes to svd_cache/float/)
+     python -m src.experiments.router_interventions.run_svd_from_expert \
+       --cache-dir svd_cache --layer_idx 0 5 10 15
+     # 8bit model (writes to svd_cache/8bit/; we dequantize to get directions; saved vectors are still float)
+     python -m src.experiments.router_interventions.run_svd_from_expert \
+       --cache-dir svd_cache --layer_idx 0 5 10 15 --quantization 8bit
+     ```
+     Then use `--svd_dir` pointing at the printed path (e.g. `svd_cache/float` or `svd_cache/8bit`) with `run_project_out` (and the same `--quantization` if used).
+3. **GPU** – Mixtral-8x7B in bfloat16 is ~92 GiB. Use `--quantization 8bit` (or `4bit`) to fit on a single GPU; otherwise the model loads with `device_map="auto"` and can span multiple GPUs or CPU offload.
 
 ### 1. Project-out experiment
 
@@ -80,11 +90,11 @@ python -m src.experiments.router_interventions.run_project_out \
   --top-k "1,4,16,64,128" \
   --output_file results_project_out.json
 
-# Target layer only on GPU (saves memory on single 44 GiB GPU)
+# With quantization (saves memory on single GPU)
 python -m src.experiments.router_interventions.run_project_out \
   --svd_dir /path/to/svd_cache \
   --layer_idx 0 \
-  --target-layer-only-gpu
+  --quantization 8bit
 
 # Fewer samples for a quick run
 python -m src.experiments.router_interventions.run_project_out \
@@ -102,18 +112,16 @@ python -m src.experiments.router_interventions.run_project_out \
 | `--top-k` | `1` | Comma-separated list of k values, e.g. `1,4,16,64,128`. |
 | `--variations` | `svd,orthogonal,random,zero,shuffle` | Which interventions to run. |
 | `--num_samples` | `200` | Number of samples for loss evaluation. |
-| `--seq-len` | `512` | Sequence length. |
-| `--batch-size` | `4` | Batch size (reduce if OOM). |
-| `--dataset` | `wikitext` | `wikitext` or `text` (with `--text-file`). |
-| `--target-layer-only-gpu` | off | Intelligent GPU memory allocation: fills GPU with as many layers as fit while **guaranteeing** the target layer is on GPU. Remaining layers offload to CPU. Optimal for single-GPU systems with limited memory (e.g., 44 GiB GPU with Mixtral loads ~12-15 layers). |
-| `--use-single-device` | off | Load model on one GPU. Use only if you have ~92+ GiB VRAM; otherwise omit. |
-| `--num-layers` | `32` | Total layers (for device_map building); 32 for Mixtral. |
-| `--quantization` | None | Quantization: `8bit` (~4x memory reduction) or `4bit` (~8x reduction). May affect accuracy. |
+| `--seq-len` | `32` | Sequence length. Use **32 for wiki_titles** (like gate-hook); 64–512 for wikitext. |
+| `--batch-size` | `64` | Batch size. With **wiki_titles** (seq_len=32) use 64–2000; with long seq reduce. |
+| `--dataset` | `wiki_titles` | `wiki_titles` (Wikipedia/Wikitext titles, seq 32), `wikitext`, or `text` (with `--text-file`). |
+| `--quantization` | None | Quantization: `8bit` (~4x memory reduction) or `4bit` (~8x reduction). Recommended for single-GPU; may affect accuracy. |
+| `--output-dir` | None | If set, save results to this folder with an indicative name (e.g. `project_out_L13_k1-4-16_wiki_titles_q8bit.json`). Ignores `--output_file`. |
 
-**Output:** `results_project_out.json` (or `--output_file`) with:
+**Output:** `results_project_out.json` (or a file in `--output-dir` with an indicative name) with:
 
 - `config` – Run configuration.
-- `baseline_loss` – Loss with original router weights.
+- `baseline_loss` – Loss with original router weights. With **wiki_titles**, baseline loss is often high (e.g. 7–8) because we only score the first few tokens of each short title; use **`--dataset wikitext`** (and e.g. `--seq-len 128`) for a lower, more natural baseline.
 - `results` – If a single `top_k` value: `{ "svd": { "loss", "delta" }, "orthogonal": ..., "random": ..., "zero": ..., "shuffle": ... }`.
 - `by_k` – If multiple `top_k` values: `{ "1": { "svd": ..., "zero": ..., ... }, "4": { ... }, ... }`.
 
@@ -134,25 +142,39 @@ Options include `--interventions`, `--variations`, `--top-k` (single value for t
 
 In `.vscode/launch.json` there are two configs:
 
-- **Router: Project out** – Single run, layer 0, `num_samples=10`, output to `results_project_out.json`. Edit `args` to set `--svd_dir` (and optionally `--layer_idx`) to your paths. Uses `--target-layer-only-gpu` by default to save GPU memory.
-- **Router: Project out (multiple k)** – Same but with `--top-k "1,4,16,64,128"` and layer 15. Also uses `--target-layer-only-gpu`.
+- **Router: Project out** – Single run, layer 0, wiki_titles, `--quantization 8bit`. Edit `args` to set `--svd_dir` and `--layer_idx` to your paths.
+- **Router: Project out (multiple k)** – Same with `--top-k "1,4,16,64,128"` and layer 13, `--quantization 8bit`.
 
 Set `PYTHONPATH` in each config to your repo root (e.g. `/worxpace/repos/py/GaleMoE` or `"${workspaceFolder}"`). Run via Run and Debug (F5) and pick the desired config.
 
-### 4. Device Mapping & Memory Strategy
+**Plotting:** Use `notebooks/project_out_plots.ipynb` to plot **Loss Δ vs layer** (for a chosen k) and **Loss Δ vs k** (for a chosen layer). Save runs with `--output-dir results` so the notebook can load all `project_out_*.json` from that folder.
 
-#### Quantization (Recommended for <48GB GPU)
+### 4. Memory: Quantization
 
 ```bash
-# 8-bit quantization: ~4x memory reduction (23GB for Mixtral-8x7B)
+# wiki_titles (seq_len=32, like gate-hook): allows large batch sizes
+python -m src.experiments.router_interventions.run_project_out \
+  --svd_dir ./svd_cache \
+  --layer_idx 15 \
+  --dataset wiki_titles \
+  --seq-len 32 \
+  --batch-size 64
+
+# 8-bit quantization + wiki_titles: ~4x memory reduction, batch 64
 python -m src.experiments.router_interventions.run_project_out \
   --quantization 8bit \
+  --dataset wiki_titles \
+  --seq-len 32 \
+  --batch-size 64 \
   --svd_dir ./svd_cache \
   --layer_idx 15
 
-# 4-bit quantization: ~8x memory reduction (12GB for Mixtral-8x7B)
+# 4-bit quantization + wiki_titles
 python -m src.experiments.router_interventions.run_project_out \
   --quantization 4bit \
+  --dataset wiki_titles \
+  --seq-len 32 \
+  --batch-size 64 \
   --svd_dir ./svd_cache \
   --layer_idx 15
 ```
@@ -161,29 +183,39 @@ python -m src.experiments.router_interventions.run_project_out \
 - 8-bit: Minimal accuracy loss (~1-2% perplexity increase), fits on 24GB GPUs
 - 4-bit: Moderate accuracy loss (~3-5% perplexity increase), fits on 16GB GPUs
 
-#### Intelligent Device Mapping (No Quantization)
+Without `--quantization`, the model loads in bfloat16 with `device_map="auto"` (can span multiple GPUs or CPU offload).
 
-- **`--target-layer-only-gpu` (Recommended for 44GB+ GPU):** Automatically calculates how many layers fit on your GPU and loads them, while **guaranteeing** the target intervention layer is on GPU (priority placement). Uses "sequential" fill: loads embeddings, norm, lm_head, target layer, then fills from layer 0, 1, 2... until GPU is full.
-  - Example: On a 44GB GPU with Mixtral-8x7B (~2.8GB/layer), it may fit ~12-15 layers on GPU (including the target layer), with the rest on CPU.
-  - This balances speed (target layer on GPU) with memory efficiency (offloads non-critical layers to CPU).
+### 5. Choosing batch size
 
-- **Default (`device_map="auto"`):** HuggingFace's automatic device mapping. May spread layers across multiple GPUs or offload more to CPU.
+**Trade-off:** Larger batch → fewer forward passes (faster) but more GPU memory per forward. The runner logs GPU memory and time per phase so you can find the best batch size for your GPU.
 
-- **`--use-single-device`:** Forces entire model to a single GPU (no device map). Only works if your GPU has enough memory (~92GB for Mixtral-8x7B).
+**How to find it:**
 
-### 5. Troubleshooting
+1. **Use the logs** – The runner prints:
+   - `After first forward (batches loaded): total=X GiB, allocated=Y GiB, free≈Z GiB`
+   - `Baseline evaluation took T seconds`
+   - From that you get: memory headroom (Z) and throughput (samples / T).
+
+2. **Sweep** – Run the same command with different `--batch-size` (e.g. 16, 32, 64, 128). Pick the **largest batch size that does not OOM** and that gives acceptable time per evaluation. Example:
+   ```bash
+   # Try 64 first (default for wiki_titles + 8bit)
+   --batch-size 64
+   # If it OOMs, try 32 or 16. If memory is free and you want speed, try 128 or 256.
+   ```
+
+3. **Rough guidance:**
+   - **wiki_titles + 8bit + seq_len 32:** often 64–256 on a 24 GiB GPU; 32–64 on 16 GiB.
+   - **wikitext + long seq_len:** reduce batch size (e.g. 2–8) so activations fit.
+
+4. **Optional:** Compare throughput: `total_samples = num_batches * batch_size`, then `samples_per_sec = total_samples / baseline_eval_time`. Prefer the batch size that maximizes samples/sec without OOM.
+
+### 6. Troubleshooting
 
 - **CUDA out of memory**
-  - **Option 1 (Best):** Use `--quantization 8bit` to reduce memory by ~4x (23GB for Mixtral-8x7B)
-  - **Option 2:** Use `--target-layer-only-gpu` to intelligently fill GPU with layers
-  - **Option 3:** Reduce `--batch-size` (try 2 or 1), `--seq-len` (try 256), or `--num_samples`
-  - Do **not** use `--use-single-device` on a single 44 GiB GPU; the full model needs ~92 GiB in bfloat16.
+  - Use `--quantization 8bit` (or `4bit`) to reduce memory. With quantization, use **`--seq-len 32`** and **`--dataset wiki_titles`** for lower activation memory; reduce `--batch-size` (e.g. 1) or `--num_samples` if needed.
 
 - **"Gate weights are still on meta device"**
-  - The code defers reading the gate until after the first forward; if you still see this, try:
-    - Running with `--target-layer-only-gpu` (recommended for single GPU, ensures target layer is materialized).
-    - Running without `--use-single-device` (default).
-    - If you have one very large GPU, try `--use-single-device` so the model loads without lazy (meta) tensors.
+  - The model is loaded with `device_map="auto"`; the gate is materialized on first forward. If you still see this, ensure you are not overriding the loader (e.g. use `--quantization 8bit` so the standard loader runs).
 
 - **Logs:** The runner logs GPU memory before/after model load and after the first forward. Use these to see how much memory is in use.
 

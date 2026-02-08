@@ -26,70 +26,39 @@
                 "--svd_dir", "/worxpace/repos/py/GaleMoE/svd_cache",
                 "--layer_idx", "0",
                 "--output_file", "/worxpace/repos/py/GaleMoE/results_project_out.json",
+                "--dataset", "wiki_titles",
                 "--num_samples", "10",
-                "--quantization", "8bit",
-                "--batch-size", "1"
+                // "--quantization", "8bit",
+                "--seq-len", "32",
+                "--batch-size", "5"
             ],
             "env": {
                 "PYTHONPATH": "/worxpace/repos/py/GaleMoE"
             }
         },
         {
-            "name": "Router: Project out (multiple k)",
+            "name": "Router: Project out (multiple k) quantization 8",
             "type": "debugpy",
             "request": "launch",
             "module": "src.experiments.router_interventions.run_project_out",
             "console": "integratedTerminal",
             "args": [
-                "--svd_dir", "/worxpace/repos/py/GaleMoE/svd_cache",
-                "--layer_idx", "13",
+                "--svd_dir", "/worxpace/repos/py/GaleMoE/svd_cache/",
+                "--layer_idx", "1",
                 "--output_file", "/worxpace/repos/py/GaleMoE/results_project_out.json",
-                "--num_samples", "100",
-                "--top-k", "1,4,16,64,128",
-                "--quantization", "8bit",
+                "--dataset", "wikitext",
+                "--num_samples", "16",
+                "--top-k", "1,4,16,64,128,256",
+                // "--quantization", "8bit",
+                "--seq-len", "128",
                 "--variations", "svd,random,zero,shuffle",
-                "--batch-size", "1"
+                "--batch-size", "5"
             ],
             "env": {
                 "PYTHONPATH": "/worxpace/repos/py/GaleMoE"
             }
         },
-        {
-            "name": "Router: Project out (8-bit quantization)",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "src.experiments.router_interventions.run_project_out",
-            "console": "integratedTerminal",
-            "args": [
-                "--svd_dir", "/worxpace/repos/py/GaleMoE/svd_cache",
-                "--layer_idx", "15",
-                "--top-k", "1,4,16,64,128",
-                "--output_file", "/worxpace/repos/py/GaleMoE/results_project_out_8bit.json",
-                "--num_samples", "50",
-                "--quantization", "8bit",
-                "--batch-size", "1"
-            ],
-            "env": {
-                "PYTHONPATH": "/worxpace/repos/py/GaleMoE"
-            }
-        },
-        {
-            "name": "Router: Project out (no quantization, intelligent GPU)",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "src.experiments.router_interventions.run_project_out",
-            "console": "integratedTerminal",
-            "args": [
-                "--svd_dir", "/worxpace/repos/py/GaleMoE/svd_cache",
-                "--layer_idx", "15",
-                "--top-k", "1,4,16",
-                "--output_file", "/worxpace/repos/py/GaleMoE/results_project_out_bf16.json",
-                "--num_samples", "20",
-                "--target-layer-only-gpu"
-            ],
-            "env": {
-                "PYTHONPATH": "/worxpace/repos/py/GaleMoE"
-            }
-        }
+       
+       
     ]
 }
