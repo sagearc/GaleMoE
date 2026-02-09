@@ -58,7 +58,35 @@
                 "PYTHONPATH": "/worxpace/repos/py/GaleMoE"
             }
         },
-       
-       
+        {
+            "name": "SVD from expert (w1)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.experiments.router_interventions.run_svd_from_expert",
+            "console": "integratedTerminal",
+            "args": [
+                "--cache-dir", "${workspaceFolder}/svd_cache",
+                "--layer_idx", "0",
+                "--weight", "w1"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "SVD from expert (w3)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.experiments.router_interventions.run_svd_from_expert",
+            "console": "integratedTerminal",
+            "args": [
+                "--cache-dir", "${workspaceFolder}/svd_cache",
+                "--layer_idx", "0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31",
+                "--weight", "w3"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
     ]
 }
