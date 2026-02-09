@@ -1,4 +1,5 @@
 """Evaluation: loss and token-distribution comparison."""
+
 from __future__ import annotations
 
 from typing import List, Tuple
@@ -12,7 +13,10 @@ class LossEvaluator:
 
     def __init__(self, model: torch.nn.Module, pad_token_id: int | None = None) -> None:
         self.model = model
-        self._device = next(model.parameters()).device
+        # Find first non-meta device
+        self._device = next(
+            (p.device for p in model.parameters() if not p.is_meta), torch.device("cpu")
+        )
         self.pad_token_id = pad_token_id
 
     @torch.no_grad()
@@ -53,12 +57,21 @@ class TokenDistributionComparator:
             log_p_after = F.log_softmax(logits_after.float(), dim=-1)
             return (p_after * (log_p_after - log_p_before)).sum(-1).mean().item()
         # CE
-        return -(F.softmax(logits_before.float(), dim=-1)
-                 * F.log_softmax(logits_after.float(), dim=-1)).sum(-1).mean().item()
+        return (
+            -(
+                F.softmax(logits_before.float(), dim=-1)
+                * F.log_softmax(logits_after.float(), dim=-1)
+            )
+            .sum(-1)
+            .mean()
+            .item()
+        )
 
 
 def confusion_matrix_top_k(
-    logits_before: torch.Tensor, logits_after: torch.Tensor, top_k: int = 2,
+    logits_before: torch.Tensor,
+    logits_after: torch.Tensor,
+    top_k: int = 2,
 ) -> Tuple[torch.Tensor, List[int]]:
     """Confusion matrix of top-1 predictions before vs after, restricted to top_k tokens."""
     pred_b = logits_before.argmax(-1).cpu()

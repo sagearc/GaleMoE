@@ -33,6 +33,15 @@ logger = logging.getLogger(__name__)
 _QUANT_SUBDIR = {"8bit": "8bit", "4bit": "4bit", None: "float"}
 
 
+def _get_model_device(model: torch.nn.Module) -> torch.device:
+    """Get the first non-meta device from model parameters."""
+    for param in model.parameters():
+        if not param.is_meta:
+            return param.device
+    logger.warning("All parameters on meta device, defaulting to CPU")
+    return torch.device("cpu")
+
+
 def _weight_float(linear: Any, quantized: bool) -> torch.Tensor:
     """Extract weight as float (dequantize int8 if needed)."""
     w = getattr(linear.weight, "data", linear.weight)
@@ -73,14 +82,15 @@ def run_svd_from_expert(
         num_experts=num_experts,
         quantization=quantization,
     )
-    loader = ModelLoader(config)
+    # Pass layer_indices as priority layers - ensures they're on GPU
+    loader = ModelLoader(config, priority_layers=layer_indices, max_gpu_layers=20)
     logger.info("Loading model (%s)...", quantization or "float")
     loader.load_tokenizer()
     model = loader.load_model()
 
     # Materialize lazy params
     try:
-        dev = next(model.parameters()).device
+        dev = _get_model_device(model)
         if dev.type == "cuda":
             with torch.no_grad():
                 model.eval()

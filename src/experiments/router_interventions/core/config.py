@@ -1,4 +1,5 @@
 """Experiment configuration."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,3 +29,4 @@ class ExperimentConfig:
     text_file: str | None = None
     top_k: Sequence[int] = (1,)
     quantization: str | None = None
+    scale: float = 1.0  # Projection scale multiplier

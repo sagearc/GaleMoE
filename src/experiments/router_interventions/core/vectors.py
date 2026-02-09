@@ -173,12 +173,13 @@ class VectorIntervention:
     # -- interventions -------------------------------------------------------
 
     @staticmethod
-    def project_out(base: torch.Tensor, remove: torch.Tensor) -> torch.Tensor:
+    def project_out(base: torch.Tensor, remove: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
         """Remove the component(s) of *base* parallel to *remove*.
 
         Args:
             base: [dim] vector to modify.
             remove: [dim] single direction **or** [k, dim] subspace basis.
+            scale: Amplification factor for projection (1.0=normal, >1=amplified ablation).
 
         Returns:
             [dim] projected vector (same dtype as *base*).
@@ -188,9 +189,10 @@ class VectorIntervention:
         remove = remove.to(device=base.device, dtype=base.dtype)
 
         if remove.ndim == 1:
-            result = base - torch.dot(base, remove) * remove
+            projection = torch.dot(base, remove) * remove
+            result = base - scale * projection
         elif remove.ndim == 2:
-            result = _project_out_subspace(base, remove)
+            result = _project_out_subspace(base, remove, scale)
         else:
             raise ValueError(f"remove must be 1-D or 2-D, got {remove.ndim}-D")
 
@@ -211,8 +213,14 @@ class VectorIntervention:
         return (base - scale * direction / (direction.norm() + 1e-12)).to(orig_dtype)
 
 
-def _project_out_subspace(base: torch.Tensor, vectors: torch.Tensor) -> torch.Tensor:
-    """Project *base* out of the subspace spanned by *vectors* [k, dim] (Gram–Schmidt)."""
+def _project_out_subspace(base: torch.Tensor, vectors: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    """Project *base* out of the subspace spanned by *vectors* [k, dim] (Gram–Schmidt).
+    
+    Args:
+        base: [dim] vector to project.
+        vectors: [k, dim] subspace basis.
+        scale: Amplification factor for projection.
+    """
     result = base.clone()
     for i in range(vectors.shape[0]):
         v = vectors[i].clone()
@@ -221,5 +229,6 @@ def _project_out_subspace(base: torch.Tensor, vectors: torch.Tensor) -> torch.Te
         n = v.norm()
         if n > 1e-12:
             v = v / n
-            result = result - torch.dot(result, v) * v
+            projection = torch.dot(result, v) * v
+            result = result - scale * projection
     return result

@@ -48,6 +48,16 @@ logger = logging.getLogger(__name__)
 VARIATIONS = ("svd", "orthogonal", "random", "zero", "shuffle")
 
 
+def _get_model_device(model: torch.nn.Module) -> torch.device:
+    """Get the first non-meta device from model parameters."""
+    for param in model.parameters():
+        if not param.is_meta:
+            return param.device
+    # Fallback to CPU if all parameters are on meta (shouldn't happen)
+    logger.warning("All parameters on meta device, defaulting to CPU")
+    return torch.device("cpu")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -116,15 +126,33 @@ def _remove_vector(variant: str, v_svd: torch.Tensor, seed: int) -> torch.Tensor
     raise ValueError(f"Unknown variant: {variant}")
 
 
+def _svd_dir_tag(svd_dir: str) -> str:
+    """Short tag for svd_dir so w1 vs w3 (and paths) don't share the same cache file."""
+    path = svd_dir.rstrip("/")
+    if "/w3" in path or path.endswith("w3"):
+        return "w3"
+    if "/w1" in path or path.endswith("w1"):
+        return "w1"
+    # Use last path component (e.g. "float") so different cache dirs don't collide
+    return Path(path).name or "svd"
+
+
 def _result_path(config: ExperimentConfig, layer_idx: int) -> Path:
-    """Build unique filename capturing all config params."""
+    """Build unique filename capturing all config params (including svd source so w1/w3 don't share cache)."""
     k_part = "-".join(str(k) for k in config.top_k)
     v_part = "-".join(config.variations)
     q = config.quantization or "none"
+    svd_tag = _svd_dir_tag(config.svd_dir)
+    # Format scale: if integer (1.0, 10.0), show without decimals; otherwise show full value
+    scale_str = (
+        f"{int(config.scale)}"
+        if config.scale == int(config.scale)
+        else f"{config.scale}"
+    )
     name = (
         f"project_out_L{layer_idx}_k{k_part}_{config.dataset}_"
         f"n{config.num_samples}_s{config.seq_len}_b{config.batch_size}_"
-        f"v{v_part}_q{q}_seed{config.seed}.json"
+        f"v{v_part}_q{q}_svd{svd_tag}_scale{scale_str}_seed{config.seed}.json"
     )
     return Path(config.output_dir) / name
 
@@ -152,7 +180,8 @@ def run_experiment(
     clock.start("total")
 
     log_gpu_memory("Before model load")
-    loader = ModelLoader(config)
+    # Pass layer_indices as priority layers - ensures they're on GPU
+    loader = ModelLoader(config, priority_layers=list(layer_indices), max_gpu_layers=15)
     with timer("Loading model"):
         tokenizer = loader.load_tokenizer()
         model = loader.load_model()
@@ -170,7 +199,8 @@ def run_experiment(
     with timer("First forward"):
         with torch.no_grad():
             model.eval()
-            _ = model(batches[0].to(next(model.parameters()).device))
+            device = _get_model_device(model)
+            _ = model(batches[0].to(device))
 
     pad_id = getattr(tokenizer, "pad_token_id", None) or getattr(
         tokenizer, "eos_token_id", None
@@ -233,6 +263,7 @@ def _run_single_layer(
             logger.info(
                 "Baseline loss=%.4f (ppl=%.1f)", base_loss, math.exp(min(base_loss, 20))
             )
+            logger.info("Projection scale: %.1f", config.scale)
 
         orig = router.original_weights
 
@@ -281,7 +312,9 @@ def _run_single_layer(
                 modified = router.original_weights.clone()
                 for i in expert_vecs.keys():
                     v_rm = _remove_vector(variant, first_vec[i], config.seed + i)
-                    modified[i] = intervention.project_out(modified[i], v_rm)
+                    modified[i] = intervention.project_out(
+                        modified[i], v_rm, scale=config.scale
+                    )
                 router.apply_weights(modified)
                 loss = evaluator.evaluate(batches)
                 fixed[variant] = {"loss": loss, "delta": loss - base_loss}
@@ -318,7 +351,9 @@ def _run_single_layer(
                             else _vectors_for_k(v_full, top_k)
                         )
                         v_rm = _remove_vector(variant, v, config.seed + i)
-                        modified[i] = intervention.project_out(modified[i], v_rm)
+                        modified[i] = intervention.project_out(
+                            modified[i], v_rm, scale=config.scale
+                        )
                     router.apply_weights(modified)
                     loss = evaluator.evaluate(batches)
                     k_results[variant] = {"loss": loss, "delta": loss - base_loss}
@@ -378,9 +413,10 @@ def main() -> None:
     p.add_argument("--text-file", default=None, help="Text file for --dataset=text")
     p.add_argument(
         "--top-k",
-        default="1",
-        metavar="K[,K,...]",
-        help="Singular-vector count(s) to project out (e.g. 1,2,4,8,16,32,64)",
+        nargs="*",
+        default=["1"],
+        metavar="K [K ...]",
+        help="Singular-vector count(s) to project out (e.g. 1 2 4 8 or 1,2,4,8,16,32,64)",
     )
     p.add_argument(
         "--quantization",
@@ -388,11 +424,21 @@ def main() -> None:
         choices=("8bit", "4bit"),
         help="Model quantization (omit for float)",
     )
+    p.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Projection scale multiplier (1.0=realistic, 10.0=amplified, 100000.0=extreme)",
+    )
 
     args = p.parse_args()
 
     variations = [v.strip() for v in args.variations.split(",") if v.strip()]
-    top_k = [int(x) for x in args.top_k.split(",") if x.strip()]
+    # Support both: --top-k 2 4 8 16 and --top-k 2,4,8,16
+    if len(args.top_k) == 1 and "," in args.top_k[0]:
+        top_k = [int(x) for x in args.top_k[0].split(",") if x.strip()]
+    else:
+        top_k = [int(x) for x in args.top_k if str(x).strip()]
     if not top_k:
         p.error("--top-k must contain at least one integer")
     if args.dataset == "text" and not args.text_file:
@@ -414,6 +460,7 @@ def main() -> None:
         text_file=args.text_file,
         top_k=top_k,
         quantization=args.quantization,
+        scale=args.scale,
     )
 
     run_experiment(config, layer_indices=args.layer_idx)

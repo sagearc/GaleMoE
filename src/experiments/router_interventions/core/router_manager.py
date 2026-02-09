@@ -71,7 +71,17 @@ class RouterManager:
     def _resolve_meta(self) -> torch.Tensor:
         """Load gate weights from state_dict when they are on meta device."""
         key = f"model.layers.{self.layer_idx}.block_sparse_moe.gate.weight"
-        state = self.model.state_dict()
+        
+        # Try to load from state_dict (may trigger loading from disk)
+        try:
+            state = self.model.state_dict()
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load state_dict for layer {self.layer_idx}. "
+                f"This may mean model weights aren't fully downloaded. "
+                f"Try running with fewer layers or ensure the model is cached locally. Error: {e}"
+            ) from e
+        
         if key not in state:
             for k in state:
                 if f"layers.{self.layer_idx}" in k and "gate" in k:
@@ -79,10 +89,18 @@ class RouterManager:
                     break
             else:
                 raise RuntimeError(f"Gate key {key!r} not in state_dict")
+        
         loaded = state[key]
         if loaded.is_meta:
-            raise RuntimeError("Gate still on meta after state_dict()")
-        device = next(self.model.parameters()).device
+            raise RuntimeError(
+                f"Gate for layer {self.layer_idx} still on meta device after state_dict(). "
+                f"This likely means:\n"
+                f"  1. Model weights aren't fully downloaded from HuggingFace\n"
+                f"  2. Insufficient GPU/CPU memory to load this layer\n"
+                f"  3. Try: running with quantization (--quantization 8bit), "
+                f"using fewer layers, or pre-downloading the model"
+            )
+        device = next((p.device for p in self.model.parameters() if not p.is_meta), torch.device("cpu"))
         self._gate.weight.data = loaded.clone().to(device, dtype=loaded.dtype)
         return self._gate.weight.data
 

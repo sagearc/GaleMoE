@@ -32,6 +32,14 @@ INTERVENTIONS = ("project_out", "inject", "subtract")
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _get_model_device(model: torch.nn.Module) -> torch.device:
+    """Get the first non-meta device from model parameters."""
+    for param in model.parameters():
+        if not param.is_meta:
+            return param.device
+    logger.warning("All parameters on meta device, defaulting to CPU")
+    return torch.device("cpu")
+
 def _make_batches(config: ExperimentConfig, tokenizer):
     if config.dataset == "wikitext":
         return WikitextBatchLoader(tokenizer, config.num_samples, config.seq_len, config.batch_size).get_batches()
@@ -80,7 +88,8 @@ def run_experiment(
     confusion_top_k: int = 2,
 ) -> Dict[str, Any]:
     """Run inject/subtract/project_out interventions with loss + token distributions."""
-    loader = ModelLoader(config)
+    # Pass layer_idx as priority layer - ensures it's on GPU
+    loader = ModelLoader(config, priority_layers=[config.layer_idx], max_gpu_layers=20)
     tokenizer = loader.load_tokenizer()
     model = loader.load_model()
 
@@ -88,7 +97,8 @@ def run_experiment(
 
     with torch.no_grad():
         model.eval()
-        _ = model(batches[0].to(next(model.parameters()).device))
+        device = _get_model_device(model)
+        _ = model(batches[0].to(device))
 
     expert_vecs = ExpertVectors(
         config.svd_dir, config.layer_idx,
