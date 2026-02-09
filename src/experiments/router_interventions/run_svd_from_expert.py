@@ -83,7 +83,8 @@ def run_svd_from_expert(
         quantization=quantization,
     )
     # Pass layer_indices as priority layers - ensures they're on GPU
-    loader = ModelLoader(config, priority_layers=layer_indices, max_gpu_layers=20)
+    # max_gpu_layers=12 leaves ~45GB headroom for activations (avoids OOM)
+    loader = ModelLoader(config, priority_layers=layer_indices, max_gpu_layers=12)
     logger.info("Loading model (%s)...", quantization or "float")
     loader.load_tokenizer()
     model = loader.load_model()

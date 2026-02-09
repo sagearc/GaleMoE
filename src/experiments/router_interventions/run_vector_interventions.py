@@ -89,7 +89,8 @@ def run_experiment(
 ) -> Dict[str, Any]:
     """Run inject/subtract/project_out interventions with loss + token distributions."""
     # Pass layer_idx as priority layer - ensures it's on GPU
-    loader = ModelLoader(config, priority_layers=[config.layer_idx], max_gpu_layers=20)
+    # max_gpu_layers=12 leaves ~45GB headroom for activations (avoids OOM)
+    loader = ModelLoader(config, priority_layers=[config.layer_idx], max_gpu_layers=12)
     tokenizer = loader.load_tokenizer()
     model = loader.load_model()
 
