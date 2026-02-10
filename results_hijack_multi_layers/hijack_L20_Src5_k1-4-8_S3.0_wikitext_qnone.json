@@ -1,0 +1,1043 @@
+{
+  "config": {
+    "svd_dir": "/root/work/repos/py/GaleMoE/svd_cache/float/w3",
+    "layer_idx": 20,
+    "output_dir": "/root/work/repos/py/GaleMoE/results_hijack_multi_layers",
+    "num_experts": 8,
+    "model_id": "mistralai/Mixtral-8x7B-v0.1",
+    "model_tag": "mistralai_Mixtral_8x7B_v0.1",
+    "num_samples": 500,
+    "seq_len": 128,
+    "batch_size": 250,
+    "seed": 42,
+    "variations": [
+      "svd",
+      "random"
+    ],
+    "dataset": "wikitext",
+    "text_file": null,
+    "top_k": [
+      1,
+      4,
+      8
+    ],
+    "quantization": null,
+    "scale": 1.0,
+    "replace_weight_decay": 1.0,
+    "mode": "hijack",
+    "source_expert": 5,
+    "transplant_target": null,
+    "inject_experts": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      6,
+      7
+    ],
+    "block_experts": [],
+    "inject_subtract_scale": 3.0,
+    "inject_weight_decay": 1.0,
+    "distribution_metric": "kl",
+    "confusion_top_k": 2,
+    "k_values": [
+      1,
+      4,
+      8
+    ]
+  },
+  "by_k": {
+    "1": {
+      "svd_hijack": {
+        "loss": 2.5681257247924805,
+        "delta": 0.02934885025024414,
+        "distribution_metric": 0.042126234620809555,
+        "distribution_metric_name": "kl",
+        "confusion_matrix": [
+          [
+            2197,
+            7
+          ],
+          [
+            5,
+            992
+          ]
+        ],
+        "confusion_token_ids": [
+          272,
+          28705
+        ],
+        "expert_confusion_matrix": [
+          [
+            568,
+            0,
+            0,
+            0,
+            0,
+            2375,
+            0,
+            0
+          ],
+          [
+            0,
+            250,
+            0,
+            0,
+            0,
+            3103,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            313,
+            0,
+            2,
+            2840,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            2,
+            254,
+            0,
+            2402,
+            0,
+            2
+          ],
+          [
+            4,
+            0,
+            1,
+            0,
+            293,
+            2940,
+            0,
+            0
+          ],
+          [
+            27,
+            57,
+            7,
+            27,
+            5,
+            3948,
+            2,
+            2
+          ],
+          [
+            0,
+            0,
+            0,
+            1,
+            1,
+            4102,
+            393,
+            0
+          ],
+          [
+            0,
+            0,
+            1,
+            2,
+            0,
+            3129,
+            0,
+            595
+          ]
+        ],
+        "expert_routing_stats": {
+          "total_tokens": 27648,
+          "stayed": 6614,
+          "migrated": 21034,
+          "migration_rate": 0.7607783564814815,
+          "expert_0": {
+            "original": 2943,
+            "retained": 568,
+            "lost": 2375,
+            "gained": 31,
+            "retention_rate": 0.19300033978933062
+          },
+          "expert_1": {
+            "original": 3353,
+            "retained": 250,
+            "lost": 3103,
+            "gained": 57,
+            "retention_rate": 0.07456009543692216
+          },
+          "expert_2": {
+            "original": 3155,
+            "retained": 313,
+            "lost": 2842,
+            "gained": 11,
+            "retention_rate": 0.09920760697305864
+          },
+          "expert_3": {
+            "original": 2660,
+            "retained": 254,
+            "lost": 2406,
+            "gained": 30,
+            "retention_rate": 0.09548872180451128
+          },
+          "expert_4": {
+            "original": 3238,
+            "retained": 293,
+            "lost": 2945,
+            "gained": 8,
+            "retention_rate": 0.09048795552810376
+          },
+          "expert_5": {
+            "original": 4075,
+            "retained": 3948,
+            "lost": 127,
+            "gained": 20891,
+            "retention_rate": 0.9688343558282209
+          },
+          "expert_6": {
+            "original": 4497,
+            "retained": 393,
+            "lost": 4104,
+            "gained": 2,
+            "retention_rate": 0.08739159439626418
+          },
+          "expert_7": {
+            "original": 3727,
+            "retained": 595,
+            "lost": 3132,
+            "gained": 4,
+            "retention_rate": 0.15964582774349342
+          }
+        }
+      },
+      "random_hijack": {
+        "loss": 2.5442185401916504,
+        "delta": 0.0054416656494140625,
+        "distribution_metric": 0.00934288464486599,
+        "distribution_metric_name": "kl",
+        "confusion_matrix": [
+          [
+            2228,
+            2
+          ],
+          [
+            4,
+            1005
+          ]
+        ],
+        "confusion_token_ids": [
+          272,
+          28705
+        ],
+        "expert_confusion_matrix": [
+          [
+            1935,
+            0,
+            1,
+            1,
+            0,
+            1006,
+            0,
+            0
+          ],
+          [
+            0,
+            2240,
+            2,
+            0,
+            0,
+            1108,
+            0,
+            3
+          ],
+          [
+            2,
+            0,
+            2273,
+            1,
+            0,
+            879,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            2,
+            2015,
+            1,
+            641,
+            0,
+            1
+          ],
+          [
+            10,
+            2,
+            1,
+            2,
+            2314,
+            906,
+            2,
+            1
+          ],
+          [
+            193,
+            423,
+            107,
+            279,
+            119,
+            2449,
+            404,
+            101
+          ],
+          [
+            4,
+            0,
+            4,
+            6,
+            7,
+            1282,
+            3192,
+            2
+          ],
+          [
+            0,
+            2,
+            1,
+            1,
+            1,
+            870,
+            0,
+            2852
+          ]
+        ],
+        "expert_routing_stats": {
+          "total_tokens": 27648,
+          "stayed": 19270,
+          "migrated": 8378,
+          "migration_rate": 0.30302372685185186,
+          "expert_0": {
+            "original": 2943,
+            "retained": 1935,
+            "lost": 1008,
+            "gained": 209,
+            "retention_rate": 0.6574923547400612
+          },
+          "expert_1": {
+            "original": 3353,
+            "retained": 2240,
+            "lost": 1113,
+            "gained": 427,
+            "retention_rate": 0.6680584551148225
+          },
+          "expert_2": {
+            "original": 3155,
+            "retained": 2273,
+            "lost": 882,
+            "gained": 118,
+            "retention_rate": 0.7204437400950872
+          },
+          "expert_3": {
+            "original": 2660,
+            "retained": 2015,
+            "lost": 645,
+            "gained": 290,
+            "retention_rate": 0.7575187969924813
+          },
+          "expert_4": {
+            "original": 3238,
+            "retained": 2314,
+            "lost": 924,
+            "gained": 128,
+            "retention_rate": 0.7146386658431131
+          },
+          "expert_5": {
+            "original": 4075,
+            "retained": 2449,
+            "lost": 1626,
+            "gained": 6692,
+            "retention_rate": 0.6009815950920245
+          },
+          "expert_6": {
+            "original": 4497,
+            "retained": 3192,
+            "lost": 1305,
+            "gained": 406,
+            "retention_rate": 0.7098065376917946
+          },
+          "expert_7": {
+            "original": 3727,
+            "retained": 2852,
+            "lost": 875,
+            "gained": 108,
+            "retention_rate": 0.7652267239066273
+          }
+        }
+      }
+    },
+    "4": {
+      "svd_hijack": {
+        "loss": 2.5722200870513916,
+        "delta": 0.03344321250915527,
+        "distribution_metric": 0.045592572540044785,
+        "distribution_metric_name": "kl",
+        "confusion_matrix": [
+          [
+            2192,
+            8
+          ],
+          [
+            3,
+            992
+          ]
+        ],
+        "confusion_token_ids": [
+          272,
+          28705
+        ],
+        "expert_confusion_matrix": [
+          [
+            355,
+            0,
+            0,
+            0,
+            0,
+            2588,
+            0,
+            0
+          ],
+          [
+            0,
+            7,
+            0,
+            0,
+            0,
+            3346,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            3,
+            0,
+            0,
+            3152,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            1,
+            0,
+            2659,
+            0,
+            0
+          ],
+          [
+            5,
+            0,
+            0,
+            0,
+            4,
+            3229,
+            0,
+            0
+          ],
+          [
+            0,
+            6,
+            1,
+            0,
+            0,
+            4068,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            4366,
+            131,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            3725,
+            0,
+            2
+          ]
+        ],
+        "expert_routing_stats": {
+          "total_tokens": 27648,
+          "stayed": 4571,
+          "migrated": 23077,
+          "migration_rate": 0.8346715856481481,
+          "expert_0": {
+            "original": 2943,
+            "retained": 355,
+            "lost": 2588,
+            "gained": 5,
+            "retention_rate": 0.12062521236833164
+          },
+          "expert_1": {
+            "original": 3353,
+            "retained": 7,
+            "lost": 3346,
+            "gained": 6,
+            "retention_rate": 0.0020876826722338203
+          },
+          "expert_2": {
+            "original": 3155,
+            "retained": 3,
+            "lost": 3152,
+            "gained": 1,
+            "retention_rate": 0.0009508716323296355
+          },
+          "expert_3": {
+            "original": 2660,
+            "retained": 1,
+            "lost": 2659,
+            "gained": 0,
+            "retention_rate": 0.00037593984962406017
+          },
+          "expert_4": {
+            "original": 3238,
+            "retained": 4,
+            "lost": 3234,
+            "gained": 0,
+            "retention_rate": 0.0012353304508956147
+          },
+          "expert_5": {
+            "original": 4075,
+            "retained": 4068,
+            "lost": 7,
+            "gained": 23065,
+            "retention_rate": 0.9982822085889571
+          },
+          "expert_6": {
+            "original": 4497,
+            "retained": 131,
+            "lost": 4366,
+            "gained": 0,
+            "retention_rate": 0.029130531465421394
+          },
+          "expert_7": {
+            "original": 3727,
+            "retained": 2,
+            "lost": 3725,
+            "gained": 0,
+            "retention_rate": 0.0005366246310705661
+          }
+        }
+      },
+      "random_hijack": {
+        "loss": 2.5416247844696045,
+        "delta": 0.002847909927368164,
+        "distribution_metric": 0.006960547063499689,
+        "distribution_metric_name": "kl",
+        "confusion_matrix": [
+          [
+            2232,
+            2
+          ],
+          [
+            4,
+            1010
+          ]
+        ],
+        "confusion_token_ids": [
+          272,
+          28705
+        ],
+        "expert_confusion_matrix": [
+          [
+            1976,
+            0,
+            0,
+            0,
+            1,
+            965,
+            1,
+            0
+          ],
+          [
+            2,
+            2769,
+            0,
+            1,
+            1,
+            578,
+            0,
+            2
+          ],
+          [
+            2,
+            2,
+            2825,
+            2,
+            3,
+            319,
+            1,
+            1
+          ],
+          [
+            1,
+            0,
+            2,
+            2295,
+            0,
+            362,
+            0,
+            0
+          ],
+          [
+            7,
+            1,
+            3,
+            2,
+            2718,
+            507,
+            0,
+            0
+          ],
+          [
+            206,
+            498,
+            115,
+            413,
+            132,
+            2112,
+            471,
+            128
+          ],
+          [
+            2,
+            2,
+            2,
+            2,
+            11,
+            872,
+            3606,
+            0
+          ],
+          [
+            3,
+            3,
+            2,
+            9,
+            3,
+            445,
+            3,
+            3259
+          ]
+        ],
+        "expert_routing_stats": {
+          "total_tokens": 27648,
+          "stayed": 21560,
+          "migrated": 6088,
+          "migration_rate": 0.22019675925925927,
+          "expert_0": {
+            "original": 2943,
+            "retained": 1976,
+            "lost": 967,
+            "gained": 223,
+            "retention_rate": 0.671423717295277
+          },
+          "expert_1": {
+            "original": 3353,
+            "retained": 2769,
+            "lost": 584,
+            "gained": 506,
+            "retention_rate": 0.8258276170593498
+          },
+          "expert_2": {
+            "original": 3155,
+            "retained": 2825,
+            "lost": 330,
+            "gained": 124,
+            "retention_rate": 0.8954041204437401
+          },
+          "expert_3": {
+            "original": 2660,
+            "retained": 2295,
+            "lost": 365,
+            "gained": 429,
+            "retention_rate": 0.8627819548872181
+          },
+          "expert_4": {
+            "original": 3238,
+            "retained": 2718,
+            "lost": 520,
+            "gained": 151,
+            "retention_rate": 0.8394070413835701
+          },
+          "expert_5": {
+            "original": 4075,
+            "retained": 2112,
+            "lost": 1963,
+            "gained": 4048,
+            "retention_rate": 0.518282208588957
+          },
+          "expert_6": {
+            "original": 4497,
+            "retained": 3606,
+            "lost": 891,
+            "gained": 476,
+            "retention_rate": 0.8018679119412941
+          },
+          "expert_7": {
+            "original": 3727,
+            "retained": 3259,
+            "lost": 468,
+            "gained": 131,
+            "retention_rate": 0.8744298363294876
+          }
+        }
+      }
+    },
+    "8": {
+      "svd_hijack": {
+        "loss": 2.5723607540130615,
+        "delta": 0.033583879470825195,
+        "distribution_metric": 0.0456165075302124,
+        "distribution_metric_name": "kl",
+        "confusion_matrix": [
+          [
+            2187,
+            7
+          ],
+          [
+            5,
+            989
+          ]
+        ],
+        "confusion_token_ids": [
+          272,
+          28705
+        ],
+        "expert_confusion_matrix": [
+          [
+            357,
+            0,
+            0,
+            0,
+            0,
+            2586,
+            0,
+            0
+          ],
+          [
+            0,
+            2,
+            0,
+            0,
+            0,
+            3351,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            3155,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            2,
+            0,
+            2658,
+            0,
+            0
+          ],
+          [
+            2,
+            0,
+            0,
+            0,
+            4,
+            3232,
+            0,
+            0
+          ],
+          [
+            0,
+            3,
+            0,
+            0,
+            0,
+            4072,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            4367,
+            130,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            3727,
+            0,
+            0
+          ]
+        ],
+        "expert_routing_stats": {
+          "total_tokens": 27648,
+          "stayed": 4567,
+          "migrated": 23081,
+          "migration_rate": 0.8348162615740741,
+          "expert_0": {
+            "original": 2943,
+            "retained": 357,
+            "lost": 2586,
+            "gained": 2,
+            "retention_rate": 0.12130479102956167
+          },
+          "expert_1": {
+            "original": 3353,
+            "retained": 2,
+            "lost": 3351,
+            "gained": 3,
+            "retention_rate": 0.0005964807634953773
+          },
+          "expert_2": {
+            "original": 3155,
+            "retained": 0,
+            "lost": 3155,
+            "gained": 0,
+            "retention_rate": 0.0
+          },
+          "expert_3": {
+            "original": 2660,
+            "retained": 2,
+            "lost": 2658,
+            "gained": 0,
+            "retention_rate": 0.0007518796992481203
+          },
+          "expert_4": {
+            "original": 3238,
+            "retained": 4,
+            "lost": 3234,
+            "gained": 0,
+            "retention_rate": 0.0012353304508956147
+          },
+          "expert_5": {
+            "original": 4075,
+            "retained": 4072,
+            "lost": 3,
+            "gained": 23076,
+            "retention_rate": 0.9992638036809816
+          },
+          "expert_6": {
+            "original": 4497,
+            "retained": 130,
+            "lost": 4367,
+            "gained": 0,
+            "retention_rate": 0.028908160996219703
+          },
+          "expert_7": {
+            "original": 3727,
+            "retained": 0,
+            "lost": 3727,
+            "gained": 0,
+            "retention_rate": 0.0
+          }
+        }
+      },
+      "random_hijack": {
+        "loss": 2.5439863204956055,
+        "delta": 0.005209445953369141,
+        "distribution_metric": 0.00814871583133936,
+        "distribution_metric_name": "kl",
+        "confusion_matrix": [
+          [
+            2221,
+            3
+          ],
+          [
+            7,
+            999
+          ]
+        ],
+        "confusion_token_ids": [
+          272,
+          28705
+        ],
+        "expert_confusion_matrix": [
+          [
+            2235,
+            2,
+            0,
+            0,
+            2,
+            703,
+            1,
+            0
+          ],
+          [
+            0,
+            2450,
+            2,
+            0,
+            0,
+            899,
+            1,
+            1
+          ],
+          [
+            1,
+            0,
+            2488,
+            1,
+            1,
+            657,
+            5,
+            2
+          ],
+          [
+            0,
+            1,
+            0,
+            1882,
+            0,
+            776,
+            1,
+            0
+          ],
+          [
+            5,
+            1,
+            2,
+            2,
+            2422,
+            801,
+            4,
+            1
+          ],
+          [
+            213,
+            455,
+            135,
+            285,
+            143,
+            2354,
+            388,
+            102
+          ],
+          [
+            3,
+            0,
+            1,
+            1,
+            4,
+            1347,
+            3141,
+            0
+          ],
+          [
+            4,
+            4,
+            1,
+            4,
+            1,
+            830,
+            0,
+            2883
+          ]
+        ],
+        "expert_routing_stats": {
+          "total_tokens": 27648,
+          "stayed": 19855,
+          "migrated": 7793,
+          "migration_rate": 0.2818648726851852,
+          "expert_0": {
+            "original": 2943,
+            "retained": 2235,
+            "lost": 708,
+            "gained": 226,
+            "retention_rate": 0.7594291539245668
+          },
+          "expert_1": {
+            "original": 3353,
+            "retained": 2450,
+            "lost": 903,
+            "gained": 463,
+            "retention_rate": 0.7306889352818372
+          },
+          "expert_2": {
+            "original": 3155,
+            "retained": 2488,
+            "lost": 667,
+            "gained": 141,
+            "retention_rate": 0.7885895404120443
+          },
+          "expert_3": {
+            "original": 2660,
+            "retained": 1882,
+            "lost": 778,
+            "gained": 293,
+            "retention_rate": 0.7075187969924812
+          },
+          "expert_4": {
+            "original": 3238,
+            "retained": 2422,
+            "lost": 816,
+            "gained": 151,
+            "retention_rate": 0.7479925880172946
+          },
+          "expert_5": {
+            "original": 4075,
+            "retained": 2354,
+            "lost": 1721,
+            "gained": 6013,
+            "retention_rate": 0.5776687116564417
+          },
+          "expert_6": {
+            "original": 4497,
+            "retained": 3141,
+            "lost": 1356,
+            "gained": 400,
+            "retention_rate": 0.6984656437625083
+          },
+          "expert_7": {
+            "original": 3727,
+            "retained": 2883,
+            "lost": 844,
+            "gained": 106,
+            "retention_rate": 0.7735444056882211
+          }
+        }
+      }
+    }
+  },
+  "baseline_loss": 2.5387768745422363
+}

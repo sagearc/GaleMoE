@@ -118,8 +118,13 @@ def _apply_intervention(kind: str, row, direction, scale: float):
 # ---------------------------------------------------------------------------
 
 
-def run_experiment(
+def _run_single_layer(
     config: ExperimentConfig,
+    layer_idx: int,
+    model: torch.nn.Module,
+    batches: List[torch.Tensor],
+    evaluator: LossEvaluator,
+    expert_vecs: ExpertVectors,
     source_expert: int,
     mode: str,
     transplant_target: int = None,
@@ -128,79 +133,16 @@ def run_experiment(
     confusion_top_k: int = 2,
     inject_weight_decay: float = 1.0,
 ) -> Dict[str, Any]:
-    """
-    Cross-expert interventions: hijack or transplant SVD vectors between experts.
-    Inject uses weighted subspace only.
-
-    Args:
-        source_expert: Expert whose SVD vectors to use
-        mode: 'hijack' or 'transplant'
-        transplant_target: For transplant mode, which expert receives the tokens (required for transplant)
-
-    Modes:
-        - hijack: Disable source (project_out), boost all others (inject weighted)
-        - transplant: Disable source (project_out), boost target (inject weighted), block others (project_out)
-    """
-    if mode == "transplant" and transplant_target is None:
-        raise ValueError("transplant mode requires --transplant-target")
-    if mode == "hijack" and transplant_target is not None:
-        raise ValueError("hijack mode does not use --transplant-target")
-
+    """Run hijack/transplant for one layer. Model and batches already loaded."""
     clock = Timer()
     clock.start("total")
-
-    # Pass layer_idx as priority layer - ensures it's on GPU
-    loader = ModelLoader(config, priority_layers=[config.layer_idx], max_gpu_layers=15)
-
-    with timer("Loading model"):
-        tokenizer = loader.load_tokenizer()
-        model = loader.load_model()
-
-    with timer("Loading data"):
-        batches = _make_batches(config, tokenizer)
-        logger.info(
-            "Batches: %d x %d = %d samples",
-            len(batches),
-            batches[0].shape[0],
-            len(batches) * batches[0].shape[0],
-        )
-
-    with timer("First forward"):
-        with torch.no_grad():
-            model.eval()
-            device = _get_model_device(model)
-            _ = model(batches[0].to(device))
-
     k_values = list(config.top_k) if config.top_k else [1]
-
-    # Load expert vectors with max k
-    with timer(f"Loading SVD vectors (L{config.layer_idx})"):
-        expert_vecs = ExpertVectors(
-            config.svd_dir,
-            config.layer_idx,
-            config.num_experts,
-            config.model_tag,
-            top_k=max(k_values),
-        )
-        expert_vecs.load()
-    if len(expert_vecs) == 0:
-        raise RuntimeError("No SVD vectors loaded. Check svd_dir and file names.")
-
-    loaded_experts = list(expert_vecs.keys())
-    if source_expert not in loaded_experts:
-        raise ValueError(
-            f"Source expert {source_expert} not found in loaded SVD vectors. Available: {loaded_experts}"
-        )
-
-    evaluator = LossEvaluator(model)
-
-    # Determine expert groups based on mode
     all_experts = list(range(config.num_experts))
     if mode == "hijack":
         inject_experts = [e for e in all_experts if e != source_expert]
         block_experts = []
         mode_str = "hijack"
-    else:  # transplant
+    else:
         inject_experts = [transplant_target]
         block_experts = [
             e for e in all_experts if e != source_expert and e != transplant_target
@@ -210,6 +152,7 @@ def run_experiment(
     results: Dict[str, Any] = {
         "config": {
             **vars(config),
+            "layer_idx": layer_idx,
             "mode": mode,
             "source_expert": source_expert,
             "transplant_target": transplant_target,
@@ -224,11 +167,11 @@ def run_experiment(
         "by_k": {},
     }
 
-    with RouterManager(model, config.layer_idx) as router:
-        with timer(f"Baseline (L{config.layer_idx})"):
+    with RouterManager(model, layer_idx) as router:
+        with timer(f"Baseline (L{layer_idx})"):
             logger.info("Evaluating baseline (single forward)...")
             routing_handle, baseline_routing_captured = register_routing_capture(
-                model, config.layer_idx
+                model, layer_idx
             )
             base_loss, baseline_logits = evaluator.evaluate_and_get_logits(batches)
             routing_handle.remove()
@@ -298,7 +241,7 @@ def run_experiment(
 
                     router.apply_weights(modified)
                     routing_handle, modified_routing_captured = (
-                        register_routing_capture(model, config.layer_idx)
+                        register_routing_capture(model, layer_idx)
                     )
                     loss, modified_logits = evaluator.evaluate_and_get_logits(
                         batches
@@ -382,23 +325,106 @@ def run_experiment(
             )
 
     logger.info("\n" + "=" * 70)
-    logger.info("TIMING REPORT")
+    logger.info("TIMING REPORT (layer %d)", layer_idx)
     logger.info("=" * 70)
     clock.report()
-
-    q = (config.quantization or "none").lower()
-    k_part = "-".join(str(k) for k in k_values)
-    scale_str = f"_S{inject_subtract_scale:.1f}" if inject_subtract_scale != 1.0 else ""
-    if mode == "hijack":
-        name = f"hijack_L{config.layer_idx}_Src{source_expert}_k{k_part}{scale_str}_{config.dataset}_q{q}.json"
-    else:
-        name = f"transplant_L{config.layer_idx}_Src{source_expert}_To{transplant_target}_k{k_part}{scale_str}_{config.dataset}_q{q}.json"
-    out_path = Path(config.output_dir) / name
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Saving results to %s", out_path)
-    with open(out_path, "w") as f:
-        json.dump(results, f, indent=2)
     return results
+
+
+def run_experiment(
+    config: ExperimentConfig,
+    layer_indices: Sequence[int],
+    source_expert: int,
+    mode: str,
+    transplant_target: int = None,
+    inject_subtract_scale: float = 1.0,
+    distribution_metric: str = "kl",
+    confusion_top_k: int = 2,
+    inject_weight_decay: float = 1.0,
+) -> Dict[str, Any] | None:
+    """
+    Run hijack/transplant on one or more layers.
+    Loads model and batches once; for each layer loads SVD vectors and runs the experiment.
+    """
+    if mode == "transplant" and transplant_target is None:
+        raise ValueError("transplant mode requires --transplant-target")
+    if mode == "hijack" and transplant_target is not None:
+        raise ValueError("hijack mode does not use --transplant-target")
+
+    layer_list = list(layer_indices) if hasattr(layer_indices, "__iter__") and not isinstance(layer_indices, (str, bytes)) else [layer_indices]
+    if not layer_list:
+        raise ValueError("layer_indices must contain at least one layer")
+
+    loader = ModelLoader(config, priority_layers=layer_list, max_gpu_layers=15)
+    with timer("Loading model"):
+        tokenizer = loader.load_tokenizer()
+        model = loader.load_model()
+    with timer("Loading data"):
+        batches = _make_batches(config, tokenizer)
+        logger.info(
+            "Batches: %d x %d = %d samples",
+            len(batches),
+            batches[0].shape[0],
+            len(batches) * batches[0].shape[0],
+        )
+    with timer("First forward"):
+        with torch.no_grad():
+            model.eval()
+            device = _get_model_device(model)
+            _ = model(batches[0].to(device))
+    evaluator = LossEvaluator(model)
+    k_values = list(config.top_k) if config.top_k else [1]
+
+    last_results = None
+    for layer_idx in layer_list:
+        logger.info("\n" + "=" * 70)
+        logger.info("LAYER %d", layer_idx)
+        logger.info("=" * 70)
+        with timer(f"Loading SVD vectors (L{layer_idx})"):
+            expert_vecs = ExpertVectors(
+                config.svd_dir,
+                layer_idx,
+                config.num_experts,
+                config.model_tag,
+                top_k=max(k_values),
+            )
+            expert_vecs.load()
+        if len(expert_vecs) == 0:
+            raise RuntimeError(f"No SVD vectors loaded for layer {layer_idx}. Check svd_dir and file names.")
+        loaded_experts = list(expert_vecs.keys())
+        if source_expert not in loaded_experts:
+            raise ValueError(
+                f"Source expert {source_expert} not found in loaded SVD vectors (layer {layer_idx}). Available: {loaded_experts}"
+            )
+        results = _run_single_layer(
+            config,
+            layer_idx,
+            model,
+            batches,
+            evaluator,
+            expert_vecs,
+            source_expert,
+            mode,
+            transplant_target=transplant_target,
+            inject_subtract_scale=inject_subtract_scale,
+            distribution_metric=distribution_metric,
+            confusion_top_k=confusion_top_k,
+            inject_weight_decay=inject_weight_decay,
+        )
+        last_results = results
+        q = (config.quantization or "none").lower()
+        k_part = "-".join(str(k) for k in k_values)
+        scale_str = f"_S{inject_subtract_scale:.1f}" if inject_subtract_scale != 1.0 else ""
+        if mode == "hijack":
+            name = f"hijack_L{layer_idx}_Src{source_expert}_k{k_part}{scale_str}_{config.dataset}_q{q}.json"
+        else:
+            name = f"transplant_L{layer_idx}_Src{source_expert}_To{transplant_target}_k{k_part}{scale_str}_{config.dataset}_q{q}.json"
+        out_path = Path(config.output_dir) / name
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving results to %s", out_path)
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=2)
+    return last_results
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +458,13 @@ Examples:
     p.add_argument(
         "--svd-dir", required=True, help="Directory with expert SVD pickle files"
     )
-    p.add_argument("--layer-idx", type=int, required=True, help="MoE layer index")
+    p.add_argument(
+        "--layer-idx",
+        type=int,
+        nargs="+",
+        required=True,
+        help="MoE layer index (one or more, e.g. 5 or 0 5 10 15)",
+    )
     p.add_argument(
         "--mode",
         required=True,
@@ -505,7 +537,7 @@ Examples:
 
     config = ExperimentConfig(
         svd_dir=args.svd_dir,
-        layer_idx=args.layer_idx,
+        layer_idx=args.layer_idx[0],
         output_dir=args.output_dir,
         num_samples=args.num_samples,
         model_id=args.model_id,
@@ -523,6 +555,7 @@ Examples:
 
     run_experiment(
         config,
+        layer_indices=args.layer_idx,
         source_expert=args.source_expert,
         mode=args.mode,
         transplant_target=args.transplant_target,
