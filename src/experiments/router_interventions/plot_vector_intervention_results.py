@@ -16,6 +16,7 @@ Usage::
         results_hijack_try/hijack_L5_Src5_k1-4-8-256_S3.0_wikitext_qnone.json \\
         --migration --k 8 --variant svd_sum_normalized_hijack --save-dir results_hijack_try/plots
 """
+
 from __future__ import annotations
 
 import argparse
@@ -92,6 +93,7 @@ def main() -> None:
         )
         if not save_dir:
             import matplotlib.pyplot as plt
+
             plt.show()
     except Exception as e:
         print(f"Delta vs k: {e}")
@@ -114,11 +116,16 @@ def main() -> None:
                 variant_key = args.variant
                 if not variant_key:
                     for k in entries:
-                        if isinstance(entries.get(k), dict) and "expert_confusion_matrix" in entries[k]:
+                        if (
+                            isinstance(entries.get(k), dict)
+                            and "expert_confusion_matrix" in entries[k]
+                        ):
                             variant_key = k
                             break
                 if not variant_key or variant_key not in entries:
-                    print(f"Variant {variant_key or '?'} not found. Available: {list(entries.keys())}")
+                    print(
+                        f"Variant {variant_key or '?'} not found. Available: {list(entries.keys())}"
+                    )
                 else:
                     entry = entries[variant_key]
                     mat = entry.get("expert_confusion_matrix")
@@ -127,7 +134,9 @@ def main() -> None:
                     else:
                         out_path = None
                         if save_dir:
-                            out_path = save_dir / f"migration_k{k_val}_{variant_key}.png"
+                            out_path = (
+                                save_dir / f"migration_k{k_val}_{variant_key}.png"
+                            )
                         plot_expert_migration_heatmap(
                             mat,
                             num_experts=num_experts,
@@ -137,6 +146,7 @@ def main() -> None:
                         )
                         if not save_dir:
                             import matplotlib.pyplot as plt
+
                             plt.show()
 
     if save_dir:

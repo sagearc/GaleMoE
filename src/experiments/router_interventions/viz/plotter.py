@@ -14,6 +14,9 @@ plot_ablation_results – bar chart of loss / delta for a single run
 Publication Settings
 -------------------
 set_publication_style()  – Configure matplotlib for publication-quality plots
+set_acl_style(use_tex=False) – ACL: 10pt serif, column widths (3.25"/6.75"), PDF font embedding.
+                               use_tex=True: LaTeX-rendered text (requires pdflatex).
+plot_delta_vs_k_acl(), plot_delta_vs_layers_acl() – Save as PDF (vector, embedded fonts).
 """
 from __future__ import annotations
 
@@ -21,8 +24,24 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import matplotlib.colors as mpl_colors
 import matplotlib.pyplot as plt
 import numpy as np
+
+# PDF: embed fonts so text stays crisp and matches paper (ACL-friendly)
+PDF_EMBED_FONTS = {
+    'pdf.fonttype': 42,  # TrueType embedded in PDF (vector, not outline)
+    'ps.fonttype': 42,
+}
+
+# ACL / publication: lighter, elegant palette (colorblind-friendly, prints well in B&W)
+ACL_COLORS = ['#6BAED6', '#E6A23C', '#2E9D8F', '#C77EB5', '#CA9161', '#949494']
+ACL_MARKERS = ['o', 's', '^', 'D', 'v', 'P']
+
+# Lighter Blues for heatmaps: bright (white) low end, avoids very dark blue at high end
+_LIGHT_BLUES = mpl_colors.LinearSegmentedColormap.from_list(
+    'light_blues', plt.cm.Blues(np.linspace(0.0, 0.75, 256))
+)
 
 # Publication-quality settings
 PUBLICATION_SETTINGS = {
@@ -34,6 +53,10 @@ PUBLICATION_SETTINGS = {
     'legend.fontsize': 13,
     'figure.dpi': 300,
     'savefig.dpi': 300,
+    'figure.facecolor': 'white',
+    'axes.facecolor': 'white',
+    'savefig.facecolor': 'white',
+    'savefig.edgecolor': 'none',
     'font.family': 'serif',
     'font.serif': ['Times New Roman', 'DejaVu Serif'],
     'mathtext.fontset': 'dejavuserif',
@@ -45,18 +68,27 @@ PUBLICATION_SETTINGS = {
     'ytick.major.width': 1.5,
     'xtick.minor.width': 1.0,
     'ytick.minor.width': 1.0,
+    **PDF_EMBED_FONTS,
 }
 
 def set_publication_style():
     """Apply publication-quality matplotlib settings."""
     plt.rcParams.update(PUBLICATION_SETTINGS)
 
-def set_acl_style():
+def set_acl_style(use_tex: bool = False):
     """Apply ACL conference paper specific matplotlib settings.
     
-    ACL papers use 10pt body text. Figures should be:
-    - Single column: 3.25 inches wide
-    - Double column: 6.75 inches wide
+    ACL prefers figures that match the paper: PDF with embedded fonts (vector),
+    and optionally LaTeX-rendered text so labels/ticks match the paper font.
+    
+    Figure widths:
+    - Single column: 3.25 inches
+    - Double column: 6.75 inches
+    
+    Args:
+        use_tex: If True, use LaTeX for all text (requires pdflatex). If False,
+            use serif fonts (Times/DejaVu Serif) and still export vector PDF with
+            embedded fonts.
     """
     acl_settings = {
         'font.size': 10,
@@ -67,9 +99,12 @@ def set_acl_style():
         'legend.fontsize': 9,
         'figure.dpi': 300,
         'savefig.dpi': 300,
+        'figure.facecolor': 'white',
+        'axes.facecolor': 'white',
+        'savefig.facecolor': 'white',
+        'savefig.edgecolor': 'none',
         'font.family': 'serif',
         'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
-        'text.usetex': False,  # Set to True if you have LaTeX installed
         'mathtext.fontset': 'dejavuserif',
         'axes.linewidth': 1.0,
         'grid.linewidth': 0.5,
@@ -80,7 +115,14 @@ def set_acl_style():
         'xtick.minor.width': 0.8,
         'ytick.minor.width': 0.8,
         'figure.constrained_layout.use': True,
+        **PDF_EMBED_FONTS,
     }
+    if use_tex:
+        acl_settings['text.usetex'] = True
+        # Match paper font (Times-like); fallback to default if mathptmx missing
+        acl_settings['text.latex.preamble'] = r'\usepackage{mathptmx}'
+    else:
+        acl_settings['text.usetex'] = False
     plt.rcParams.update(acl_settings)
 
 
@@ -164,11 +206,13 @@ def plot_delta_vs_k(
     variants = variants or all_variants
 
     fig, ax = plt.subplots(figsize=figsize)
-    
-    # Clean, professional colors
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-    markers = ['o', 's', '^', 'D', 'v', 'p']
-    
+    acl = publication_mode
+    colors = ACL_COLORS if acl else ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+    markers = ACL_MARKERS if acl else ['o', 's', '^', 'D', 'v', 'p']
+    lw = 1.8 if acl else 2.0
+    ms = 5 if acl else 7
+    mew = 0.8 if acl else 1.0
+
     for i, var in enumerate(variants):
         deltas = []
         for k in k_vals:
@@ -176,56 +220,54 @@ def plot_delta_vs_k(
             d = entry.get(var, {}).get("delta")
             deltas.append(d)
         if all(d is not None for d in deltas):
-            ax.plot(k_vals, deltas, 
-                   marker=markers[i % len(markers)],
-                   label=var.replace('_', ' ').title(), 
-                   color=colors[i % len(colors)],
-                   linewidth=2.0,
-                   markersize=7,
-                   markeredgewidth=1.0,
-                   markeredgecolor='white')
-    
-    ax.set_xlabel("$k$ (number of singular vectors)", fontsize=12)
-    ax.set_ylabel("Loss $\\Delta$", fontsize=12)
+            ax.plot(k_vals, deltas,
+                    marker=markers[i % len(markers)],
+                    label=var.replace('_', ' ').title(),
+                    color=colors[i % len(colors)],
+                    linewidth=lw,
+                    markersize=ms,
+                    markeredgewidth=mew,
+                    markeredgecolor='white' if not acl else 'w',
+                    zorder=2)
+    ax.set_xlabel("Number of vectors $k$" if acl else "$k$ (number of singular vectors)")
+    ax.set_ylabel("Loss increase $\\Delta$" if acl else "Loss $\\Delta$")
     if title:
-        ax.set_title(title, fontsize=13)
-    ax.axhline(0, color='gray', ls='--', lw=1.0, alpha=0.5, zorder=0)
-    
+        ax.set_title(title)
+    ax.axhline(0, color='gray', ls='--', lw=0.8, alpha=0.6, zorder=0)
     if ylim is not None:
         ax.set_ylim(ylim)
-    
-    # Better legend
-    ax.legend(frameon=True, loc='best', fontsize=10)
-    
-    # Grid
-    ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+    ax.legend(
+        frameon=True,
+        loc='best',
+        framealpha=0.95 if acl else 1.0,
+        edgecolor='none' if acl else 'inherit',
+        fancybox=False,
+    )
+    ax.grid(True, axis='y' if acl else 'both', alpha=0.35, linestyle='-', linewidth=0.4)
     ax.set_axisbelow(True)
-    
-    # Clean spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    
-    # Fix x-axis for better readability
-    if len(k_vals) > 8:
-        # Use log scale for many k values
-        ax.set_xscale('log', base=2)
-        ax.set_xticks(k_vals)
-        ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
-        # Rotate labels to prevent overlap
+    if acl:
+        ax.xaxis.set_tick_params(width=0.8)
+        ax.yaxis.set_tick_params(width=0.8)
+    ax.set_xscale('log', base=2)
+    ax.set_xticks(k_vals)
+    ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
+    if len(k_vals) > 6:
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-    else:
-        ax.set_xticks(k_vals)
-    
     fig.tight_layout()
     
     if save_path:
         save_path = Path(save_path)
-        if publication_mode and save_path.suffix in ['.png', '.jpg']:
-            # Also save PDF version for publication
-            pdf_path = save_path.with_suffix('.pdf')
-            fig.savefig(pdf_path, bbox_inches="tight", dpi=300, format='pdf')
-            print(f"Saved publication PDF: {pdf_path}")
-        fig.savefig(save_path, bbox_inches="tight", dpi=300 if publication_mode else 150)
+        if publication_mode:
+            pdf_path = save_path.with_suffix('.pdf') if save_path.suffix != '.pdf' else save_path
+            fig.savefig(pdf_path, bbox_inches="tight", format='pdf')
+            if pdf_path != save_path:
+                print(f"Saved publication PDF: {pdf_path}")
+            if save_path.suffix not in ('.pdf',):
+                fig.savefig(save_path, bbox_inches="tight", dpi=300)
+        else:
+            fig.savefig(save_path, bbox_inches="tight", dpi=150)
         
     return fig
 
@@ -280,55 +322,61 @@ def plot_delta_vs_layers(
     variants = variants or all_vars
 
     fig, ax = plt.subplots(figsize=figsize)
-    
-    # Clean, professional colors
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-    markers = ['o', 's', '^', 'D', 'v', 'p']
-    
+    acl = publication_mode
+    colors = ACL_COLORS if acl else ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+    markers = ACL_MARKERS if acl else ['o', 's', '^', 'D', 'v', 'p']
+    lw = 1.8 if acl else 2.0
+    ms = 5 if acl else 7
+    mew = 0.8 if acl else 1.0
+
     for i, var in enumerate(variants):
         deltas = [by_layer[l].get(var) for l in layers]
         if any(d is None for d in deltas):
             continue
         ax.plot(layers, deltas,
-               marker=markers[i % len(markers)],
-               label=var.replace('_', ' ').title(),
-               color=colors[i % len(colors)],
-               linewidth=2.0,
-               markersize=7,
-               markeredgewidth=1.0,
-               markeredgecolor='white')
-    
-    ax.set_xlabel("Layer Index", fontsize=12)
-    ax.set_ylabel("Loss $\\Delta$", fontsize=12)
+                marker=markers[i % len(markers)],
+                label=var.replace('_', ' ').title(),
+                color=colors[i % len(colors)],
+                linewidth=lw,
+                markersize=ms,
+                markeredgewidth=mew,
+                markeredgecolor='white' if not acl else 'w',
+                zorder=2)
+    ax.set_xlabel("Layer" if acl else "Layer Index")
+    ax.set_ylabel("Loss increase $\\Delta$" if acl else "Loss $\\Delta$")
     if title:
-        ax.set_title(title, fontsize=13)
-    ax.axhline(0, color='gray', ls='--', lw=1.0, alpha=0.5, zorder=0)
-    
+        ax.set_title(title)
+    ax.axhline(0, color='gray', ls='--', lw=0.8, alpha=0.6, zorder=0)
     if ylim is not None:
         ax.set_ylim(ylim)
-    
-    # Better legend
-    ax.legend(frameon=True, loc='best', fontsize=10)
-    
-    # Grid
-    ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+    ax.legend(
+        frameon=True,
+        loc='best',
+        framealpha=0.95 if acl else 1.0,
+        edgecolor='none' if acl else 'inherit',
+        fancybox=False,
+    )
+    ax.grid(True, axis='y' if acl else 'both', alpha=0.35, linestyle='-', linewidth=0.4)
     ax.set_axisbelow(True)
-    
-    # Clean spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    
+    if acl:
+        ax.xaxis.set_tick_params(width=0.8)
+        ax.yaxis.set_tick_params(width=0.8)
     ax.set_xticks(layers)
     fig.tight_layout()
     
     if save_path:
         save_path = Path(save_path)
-        if publication_mode and save_path.suffix in ['.png', '.jpg']:
-            # Also save PDF version for publication
-            pdf_path = save_path.with_suffix('.pdf')
-            fig.savefig(pdf_path, bbox_inches="tight", dpi=300, format='pdf')
-            print(f"Saved publication PDF: {pdf_path}")
-        fig.savefig(save_path, bbox_inches="tight", dpi=300 if publication_mode else 150)
+        if publication_mode:
+            pdf_path = save_path.with_suffix('.pdf') if save_path.suffix != '.pdf' else save_path
+            fig.savefig(pdf_path, bbox_inches="tight", format='pdf')
+            if pdf_path != save_path:
+                print(f"Saved publication PDF: {pdf_path}")
+            if save_path.suffix not in ('.pdf',):
+                fig.savefig(save_path, bbox_inches="tight", dpi=300)
+        else:
+            fig.savefig(save_path, bbox_inches="tight", dpi=150)
         
     return fig
 
@@ -488,6 +536,48 @@ def plot_expert_migration_heatmap(
 # ACL Paper Convenience Functions
 # ---------------------------------------------------------------------------
 
+def plot_confusion_heatmap_acl(
+    matrix,
+    *,
+    column_width: str = "single",
+    use_tex: bool = False,
+    save_path: str | Path | None = None,
+    **kwargs,
+) -> plt.Figure:
+    """ACL-formatted confusion heatmap (serif, column width, optional PDF)."""
+    set_acl_style(use_tex=use_tex)
+    if column_width == "single":
+        figsize = (3.25, 3.0)
+    elif column_width == "double":
+        figsize = (6.75, 5.0)
+    else:
+        raise ValueError(f"column_width must be 'single' or 'double', got {column_width!r}")
+    return plot_confusion_heatmap(
+        matrix, figsize=figsize, save_path=save_path, cmap=_LIGHT_BLUES, **kwargs
+    )
+
+
+def plot_expert_migration_heatmap_acl(
+    matrix,
+    *,
+    column_width: str = "single",
+    use_tex: bool = False,
+    save_path: str | Path | None = None,
+    **kwargs,
+) -> plt.Figure:
+    """ACL-formatted expert migration heatmap (serif, column width, optional PDF)."""
+    set_acl_style(use_tex=use_tex)
+    if column_width == "single":
+        figsize = (3.25, 3.0)
+    elif column_width == "double":
+        figsize = (6.75, 5.0)
+    else:
+        raise ValueError(f"column_width must be 'single' or 'double', got {column_width!r}")
+    return plot_expert_migration_heatmap(
+        matrix, figsize=figsize, save_path=save_path, cmap=_LIGHT_BLUES, **kwargs
+    )
+
+
 def plot_delta_vs_k_acl(
     results: Dict[str, Any],
     *,
@@ -496,15 +586,18 @@ def plot_delta_vs_k_acl(
     ylim: Optional[tuple[float, float]] = None,
     save_path: str | Path | None = None,
     show_title: bool = False,
+    use_tex: bool = False,
 ) -> plt.Figure:
     """
-    Create ACL-formatted plot of loss delta vs k.
+    Create ACL-formatted plot of loss delta vs k (PDF, column width, serif/LaTeX).
     
     Args:
         column_width: "single" (3.25") or "double" (6.75")
         show_title: If False (default), no title (use LaTeX caption)
+        use_tex: If True, render text with LaTeX (matches paper font; requires pdflatex).
+                 If False, use serif fonts and embed in PDF (vector, crisp).
     """
-    set_acl_style()
+    set_acl_style(use_tex=use_tex)
     
     if column_width == "single":
         figsize = (3.25, 2.5)
@@ -533,15 +626,17 @@ def plot_delta_vs_layers_acl(
     ylim: Optional[tuple[float, float]] = None,
     save_path: str | Path | None = None,
     show_title: bool = False,
+    use_tex: bool = False,
 ) -> plt.Figure:
     """
-    Create ACL-formatted plot of loss delta vs layers.
+    Create ACL-formatted plot of loss delta vs layers (PDF, column width, serif/LaTeX).
     
     Args:
         column_width: "single" (3.25") or "double" (6.75")
         show_title: If False (default), no title (use LaTeX caption)
+        use_tex: If True, render text with LaTeX (requires pdflatex). If False, serif + PDF.
     """
-    set_acl_style()
+    set_acl_style(use_tex=use_tex)
     
     if column_width == "single":
         figsize = (3.25, 2.5)
