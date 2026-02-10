@@ -30,3 +30,4 @@ class ExperimentConfig:
     top_k: Sequence[int] = (1,)
     quantization: str | None = None
     scale: float = 1.0  # Projection scale multiplier
+    replace_weight_decay: float = 1.0  # For "replace" variant: w_i ∝ 1/(i+1)^decay

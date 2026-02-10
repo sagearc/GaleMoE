@@ -7,6 +7,7 @@ from .plotter import (
     plot_confusion_from_results,
     plot_delta_vs_k,
     plot_delta_vs_layers,
+    plot_expert_migration_heatmap,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "plot_confusion_from_results",
     "plot_delta_vs_k",
     "plot_delta_vs_layers",
+    "plot_expert_migration_heatmap",
 ]

@@ -13,7 +13,15 @@ Results format:
     - "k_independent": dict of {variant: {"loss": ..., "delta": ...}}
       Contains zero, shuffle, orthogonal (same for all k)
     - "by_k": dict of {k: {variant: {"loss": ..., "delta": ...}}}
-      Contains svd and random per k (and any other k-dependent variants)
+      Contains svd and random per k (both are k-dependent)
+      
+Variants:
+    - svd: Project out top-k SVD from each expert row
+    - orthogonal: Random direction orthogonal to v1 (k-independent)
+    - random: Project out k random orthonormal vectors (k-dependent)
+    - zero: Zero out entire router (k-independent)
+    - shuffle: Permute expert rows (k-independent)
+    - replace: Replace each router row with scale * unit(weighted_sum of that expert's top-k SVD) (k-dependent)
       
 Old format (still supported for backward compatibility):
     All variants were duplicated for each k value in "by_k"
@@ -45,7 +53,32 @@ from .core.memory import log_gpu_memory
 
 logger = logging.getLogger(__name__)
 
-VARIATIONS = ("svd", "orthogonal", "random", "zero", "shuffle")
+
+def _orthogonalize_rows_gs(R: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    # R: [E, d]
+    Rf = R.float()
+    Q = []
+    for i in range(Rf.shape[0]):
+        v = Rf[i].clone()
+        for q in Q:
+            v = v - (v @ q) * q
+        n = v.norm()
+        if n < eps:
+            # fallback: keep original (or random) if it collapses
+            v = Rf[i].clone()
+            n = v.norm() + eps
+        Q.append(v / n)
+    return torch.stack(Q, dim=0).to(dtype=R.dtype, device=R.device)
+
+
+# Ablation variants:
+# - svd: Project out top-k SVD right singular vectors
+# - orthogonal: Project out random direction orthogonal to v1
+# - random: Project out k random orthonormal vectors in full R^dim (QR decomposition)
+# - zero: Zero out entire router layer
+# - shuffle: Random permutation of expert rows
+# - replace: Replace each router row with scale * unit(weighted_sum of that expert's top-k SVD)
+VARIATIONS = ("svd", "orthogonal", "random", "zero", "shuffle", "replace")
 
 
 def _get_model_device(model: torch.nn.Module) -> torch.device:
@@ -121,8 +154,14 @@ def _remove_vector(variant: str, v_svd: torch.Tensor, seed: int) -> torch.Tensor
     if variant == "orthogonal":
         return VectorIntervention.make_orthogonal(v1, seed)
     if variant == "random":
-        # Random direction in the same SVD rank (span of v_svd), not full R^dim
-        return VectorIntervention.make_random_in_span(v_svd, seed)
+        # Random k orthonormal vectors in full R^dim (not constrained to SVD span)
+        # Matches main2.py implementation
+        k = v_svd.shape[0] if v_svd.ndim == 2 else 1
+        dim = v_svd.shape[-1]
+        v_rand = VectorIntervention.make_random_subspace(
+            k, dim, seed, device=v_svd.device
+        )
+        return v_rand[0] if k == 1 else v_rand
     raise ValueError(f"Unknown variant: {variant}")
 
 
@@ -330,7 +369,7 @@ def _run_single_layer(
         # (random is k-dependent: computed per top_k in the per-k loop below)
         results["k_independent"] = fixed
 
-        # Per-k loop (only for k-dependent variants like 'svd')
+        # Per-k loop (only for k-dependent variants: svd, random, replace)
         for top_k in k_values:
             logger.info("\n--- top_k=%d ---", top_k)
             k_results: Dict[str, Any] = {}
@@ -340,20 +379,41 @@ def _run_single_layer(
                 if variant in fixed:
                     continue
 
-                # Only compute k-dependent variants (svd, etc.)
-                with timer(f"SVD k={top_k}"):
+                with timer(f"{variant} k={top_k}"):
                     logger.info("Computing %s (k=%d)", variant.upper(), top_k)
                     modified = router.original_weights.clone()
-                    for i, v_full in expert_vecs.items():
-                        v = (
-                            first_vec[i]
-                            if top_k == 1
-                            else _vectors_for_k(v_full, top_k)
-                        )
-                        v_rm = _remove_vector(variant, v, config.seed + i)
-                        modified[i] = intervention.project_out(
-                            modified[i], v_rm, scale=config.scale
-                        )
+
+                    if variant == "replace":
+                        # Replace each row with weighted subspace of that expert's top-k SVD
+                        orig_norms = modified.norm(dim=1)
+                        for i, v_full in expert_vecs.items():
+                            v_k = _vectors_for_k(v_full, top_k)
+                            if v_k.ndim == 1:
+                                v_k = v_k.unsqueeze(0)
+                            v_k = v_k.to(device=modified.device, dtype=modified.dtype)
+                            orig_norm = modified[i].norm()
+                            new_row = intervention.weighted_subspace_row(
+                                v_k,
+                                scale=config.scale,
+                                weight_decay=config.replace_weight_decay,
+                            )
+                            new_norm = new_row.norm()
+                            if new_norm > 0:
+                                new_row = new_row * (orig_norm / new_norm)
+                            modified[i] = new_row
+                        modified = _orthogonalize_rows_gs(modified)
+                        new_norms = modified.norm(dim=1) + 1e-12
+                        modified = modified * (orig_norms / new_norms).unsqueeze(1)
+
+                    else:
+                        # Project out: svd, random
+                        for i, v_full in expert_vecs.items():
+                            v = _vectors_for_k(v_full, top_k)
+                            v_rm = _remove_vector(variant, v, config.seed + i)
+                            modified[i] = intervention.project_out(
+                                modified[i], v_rm, scale=config.scale
+                            )
+
                     router.apply_weights(modified)
                     loss = evaluator.evaluate(batches)
                     k_results[variant] = {"loss": loss, "delta": loss - base_loss}
@@ -363,6 +423,7 @@ def _run_single_layer(
                         loss,
                         loss - base_loss,
                     )
+                    router.restore()
 
             results["by_k"][top_k] = k_results
 
@@ -405,7 +466,7 @@ def main() -> None:
     p.add_argument(
         "--variations",
         default="svd,orthogonal,random,zero,shuffle",
-        help="Comma-separated: svd,orthogonal,random,zero,shuffle",
+        help="Comma-separated: svd,orthogonal,random,zero,shuffle,replace",
     )
     p.add_argument(
         "--dataset", default="wiki_titles", choices=("wikitext", "wiki_titles", "text")
@@ -428,7 +489,13 @@ def main() -> None:
         "--scale",
         type=float,
         default=1.0,
-        help="Projection scale multiplier (1.0=realistic, 10.0=amplified, 100000.0=extreme)",
+        help="Projection scale multiplier (1.0=realistic, 10.0=amplified). Also used for replace variant.",
+    )
+    p.add_argument(
+        "--replace-weight-decay",
+        type=float,
+        default=1.0,
+        help="For 'replace' variant only: w_i ∝ 1/(i+1)^decay (default 1.0)",
     )
 
     args = p.parse_args()
@@ -461,6 +528,7 @@ def main() -> None:
         top_k=top_k,
         quantization=args.quantization,
         scale=args.scale,
+        replace_weight_decay=args.replace_weight_decay,
     )
 
     run_experiment(config, layer_indices=args.layer_idx)
