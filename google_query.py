@@ -9,9 +9,7 @@ from tqdm import tqdm
 INPUT_FILE = "results/neuron_top20_titles_layer16_expert0_w3.csv"
 OUTPUT_FILE = "clustered_neurons.json"
 BATCH_SIZE = 128 
-MAX_RETRIES = 5  
-RPM_LIMIT = 15
-SECONDS_BETWEEN_REQUESTS = 60 / RPM_LIMIT
+MAX_RETRIES = 5
 
 client = genai.Client()
 
@@ -108,8 +106,6 @@ def main():
     for i in loop:
         batch_df = df_to_process.iloc[i : i + BATCH_SIZE]
         print(f"Processing batch ({i} to {i + len(batch_df)})...")
-
-        start_time = time.time()
         
         batch_results = get_topics_from_gemini(batch_df)
         if batch_results:
@@ -118,11 +114,6 @@ def main():
             # Save progress incrementally
             with open(OUTPUT_FILE, "w") as f:
                 json.dump(all_results, f, indent=2)
-
-        # Rate Limiting Logic
-        elapsed = time.time() - start_time
-        if elapsed < SECONDS_BETWEEN_REQUESTS:
-            time.sleep(SECONDS_BETWEEN_REQUESTS - elapsed)
 
     print(f"Task Complete! Results saved to {OUTPUT_FILE}")
 
