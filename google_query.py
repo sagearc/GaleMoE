@@ -1,6 +1,7 @@
 import pandas as pd
 import time
 import json
+import asyncio
 from google import genai
 from pydantic import BaseModel, Field
 from tqdm import tqdm
@@ -10,6 +11,7 @@ INPUT_FILE = "results/neuron_top20_titles_layer16_expert0_w3.csv"
 OUTPUT_FILE = "clustered_neurons.json"
 BATCH_SIZE = 128 
 MAX_RETRIES = 5
+PARALLEL_REQUESTS = 112
 
 client = genai.Client()
 
@@ -25,7 +27,7 @@ class NeuronTopic(BaseModel):
 class BatchResult(BaseModel):
     results: list[NeuronTopic] = Field(description="A list of processed neurons.")
 
-def get_topics_from_gemini(batch_df):
+async def get_topics_from_gemini(batch_df):
     """Sends a batch to Gemini and returns parsed JSON results using Structured Outputs."""
     
     batch_data = [
@@ -51,7 +53,7 @@ def get_topics_from_gemini(batch_df):
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = client.models.generate_content(
+            response = await client.aio.models.generate_content(
                 model="gemini-2.5-flash-lite",
                 contents=prompt,
                 config={
@@ -78,7 +80,7 @@ def get_topics_from_gemini(batch_df):
                 return [] 
 
 # --- MAIN EXECUTION ---
-def main():
+async def main():
     try:
         df = pd.read_csv(INPUT_FILE)
     except FileNotFoundError:
@@ -99,23 +101,36 @@ def main():
     df_to_process = df[~df['neuron_id'].isin(processed_ids)]
     print(f"Rows remaining to process: {len(df_to_process)}")
 
-    loop = tqdm(range(0, len(df_to_process), BATCH_SIZE),
-                desc="Processing Batches",
-                unit_scale=BATCH_SIZE,
-                unit="batches")
-    for i in loop:
+    # Create list of all batches
+    all_batches = []
+    for i in range(0, len(df_to_process), BATCH_SIZE):
         batch_df = df_to_process.iloc[i : i + BATCH_SIZE]
-        print(f"Processing batch ({i} to {i + len(batch_df)})...")
-        
-        batch_results = get_topics_from_gemini(batch_df)
-        if batch_results:
-            all_results.extend(batch_results)
-
-            # Save progress incrementally
+        all_batches.append((i, batch_df))
+    
+    # Process batches in parallel groups
+    with tqdm(total=len(all_batches), desc="Processing Batches", unit="batch") as pbar:
+        for chunk_start in range(0, len(all_batches), PARALLEL_REQUESTS):
+            chunk_end = min(chunk_start + PARALLEL_REQUESTS, len(all_batches))
+            batch_chunk = all_batches[chunk_start:chunk_end]
+            
+            print(f"\nProcessing {len(batch_chunk)} batches in parallel...")
+            
+            # Run parallel requests
+            tasks = [get_topics_from_gemini(batch_df) for _, batch_df in batch_chunk]
+            chunk_results = await asyncio.gather(*tasks)
+            
+            # Extend results from all parallel requests
+            for batch_results in chunk_results:
+                if batch_results:
+                    all_results.extend(batch_results)
+            
+            # Save progress incrementally after each parallel chunk
             with open(OUTPUT_FILE, "w") as f:
                 json.dump(all_results, f, indent=2)
+            
+            pbar.update(len(batch_chunk))
 
-    print(f"Task Complete! Results saved to {OUTPUT_FILE}")
+    print(f"\nTask Complete! Results saved to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
