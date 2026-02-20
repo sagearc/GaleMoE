@@ -4,10 +4,16 @@ import json
 from google import genai
 from pydantic import BaseModel, Field
 from tqdm import tqdm
+import os
 
 # --- CONFIGURATION ---
-INPUT_FILE = "results/neuron_top20_titles_layer16_expert0_w3.csv"
-OUTPUT_FILE = "clustered_neurons.json"
+LAYER = 16
+EXPERT = os.getenv("EXPERT")
+W = 3
+
+INPUT_FILE = f"results/neuron_top20_titles_layer{LAYER}_expert{EXPERT}_w{W}.csv"
+OUTPUT_FILE = f"clustered_neurons_layer{LAYER}_expert{EXPERT}_w{W}.json"
+
 BATCH_SIZE = 128 
 MAX_RETRIES = 5
 
