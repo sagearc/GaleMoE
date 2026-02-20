@@ -5,8 +5,8 @@ import torch
 from tqdm import tqdm
 import numpy as np
 
-EXPERT_ID = 7
-W_ID = 1
+EXPERT_ID = 0
+W_ID = 3
 LAYER_ID = 16
 
 
