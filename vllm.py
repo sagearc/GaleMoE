@@ -23,7 +23,6 @@ class TopicDetail(BaseModel):
     specific_niche: str = Field(description="The highly granular, specific unifying theme. Must be as precise and detailed as possible.")
 
 class NeuronTopic(BaseModel):
-    neuron_id: int = Field(description="The exact ID of the neuron from the input data.")
     topics: list[TopicDetail] = Field(min_length=2, max_length=2, description="Exactly TWO topic classifications for these titles.")
 
 async def get_topics_from_vllm(row, semaphore):
@@ -39,7 +38,6 @@ async def get_topics_from_vllm(row, semaphore):
             # Unbiased prompt - let the model find patterns naturally
             prompt = f"""Analyze this neuron and return ONLY valid JSON.
 
-Neuron ID: {neuron_id}
 Titles: {json.dumps(titles, ensure_ascii=False)}
 
 Identify TWO distinct themes:
@@ -74,7 +72,7 @@ Identify TWO distinct themes:
                     
                     parsed_data = NeuronTopic.model_validate_json(content)
                     result = parsed_data.model_dump()
-                    assert result['neuron_id'] == neuron_id, f"Neuron ID mismatch in response. Expected {neuron_id}, got {result['neuron_id']}"
+                    result['neuron_id'] = neuron_id
                     return result
                     
                 except asyncio.TimeoutError:
