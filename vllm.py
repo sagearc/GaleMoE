@@ -1,4 +1,5 @@
-# vllm serve Qwen/Qwen3-32B-AWQ --quantization awq --no-enable-prefix-caching --enforce-eager
+# vllm serve Qwen/Qwen3-32B --no-enable-prefix-caching --enforce-eager --max-model-len 16384
+
 
 import json
 import asyncio
@@ -12,7 +13,7 @@ client = AsyncOpenAI(
     base_url="http://localhost:8000/v1", 
     api_key="vllm-runs-locally"
 )
-MODEL_NAME = "Qwen/Qwen3-32B-AWQ" # Must match the --model flag used to start vLLM
+MODEL_NAME = "Qwen/Qwen3-32B" # Must match the --model flag used to start vLLM
 MAX_RETRIES = 5
 MAX_CONCURRENT_REQUESTS = 100  # Limit concurrent requests to avoid overwhelming the server
 
@@ -89,6 +90,8 @@ Identify TWO distinct themes:
         except Exception as e:
             print(f"Neuron {neuron_id} - Unexpected error: {e}")
             return None
+
+
 async def main():
     import sys
     import os
@@ -98,7 +101,7 @@ async def main():
     if len(sys.argv) > 1:
         csv_path = sys.argv[1]
     else:
-        csv_path = 'neuron_top20_titles_layer16_expert0_w3.csv'
+        csv_path = 'neuron_top20_titles_layer16_expert1_w3.csv'
     
     # Create output directory for individual results
     output_dir = csv_path.replace('.csv', '_results')
