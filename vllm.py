@@ -23,19 +23,20 @@ class TopicDetail(BaseModel):
 
 class NeuronTopic(BaseModel):
     neuron_id: int = Field(description="The exact ID of the neuron from the input data.")
-    topics: list[TopicDetail] = Field(description="Exactly TWO topic classifications for these titles.")
+    topics: list[TopicDetail] = Field(min_length=2, max_length=2, description="Exactly TWO topic classifications for these titles.")
 
 async def get_topics_from_vllm(row, semaphore):
     """Process a single neuron row and return its topic classification."""
+    neuron_id = int(row['neuron_id'])
+    
     async with semaphore:
-        neuron_id = int(row['neuron_id'])
-        
-        # Get all columns except neuron_id (top1, top2, ..., top20)
-        title_cols = [col for col in row.index if col.startswith('top')]
-        titles = [row[col] for col in title_cols if pd.notna(row[col])]
-        
-        # Unbiased prompt - let the model find patterns naturally
-        prompt = f"""Analyze this neuron and return ONLY valid JSON.
+        try:
+            # Get all columns except neuron_id (top1, top2, ..., top20)
+            title_cols = [col for col in row.index if col.startswith('top')]
+            titles = [row[col] for col in title_cols if pd.notna(row[col])]
+            
+            # Unbiased prompt - let the model find patterns naturally
+            prompt = f"""Analyze this neuron and return ONLY valid JSON.
 
 Neuron ID: {neuron_id}
 Titles: {json.dumps(titles, ensure_ascii=False)}
@@ -44,38 +45,48 @@ Identify TWO distinct themes:
 - 'domain': broad, general category
 - 'specific_niche': highly specific, granular unifying theme"""
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = await client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[{"role": "user", "content": prompt}],
-                    extra_body={
-                        "structured_outputs": {
-                            "json": NeuronTopic.model_json_schema()
-                        }
-                    },
-                    temperature=0.1
-                )
-                
-                content = response.choices[0].message.content.strip()
-                
-                # Extract JSON if wrapped in text
-                if not content.startswith('{'):
-                    start = content.find('{')
-                    end = content.rfind('}') + 1
-                    if start != -1 and end > start:
-                        content = content[start:end]
-                
-                parsed_data = NeuronTopic.model_validate_json(content)
-                return parsed_data.model_dump()
-                
-            except Exception as e:
-                if attempt < MAX_RETRIES - 1:
-                    print(f"Attempt {attempt + 1} failed: {e}. Retrying...")
-                else:
-                    print(f"All {MAX_RETRIES} attempts failed. Last error: {e}")
-                    raise
-
+            for attempt in range(MAX_RETRIES):
+                try:
+                    # Add timeout to prevent hanging
+                    response = await asyncio.wait_for(
+                        client.chat.completions.create(
+                            model=MODEL_NAME,
+                            messages=[{"role": "user", "content": prompt}],
+                            extra_body={
+                                "structured_outputs": {
+                                    "json": NeuronTopic.model_json_schema()
+                                }
+                            },
+                            temperature=0.1
+                        ),
+                        timeout=60.0  # 60 second timeout per request
+                    )
+                    
+                    content = response.choices[0].message.content.strip()
+                    
+                    # Extract JSON if wrapped in text
+                    if not content.startswith('{'):
+                        start = content.find('{')
+                        end = content.rfind('}') + 1
+                        if start != -1 and end > start:
+                            content = content[start:end]
+                    
+                    parsed_data = NeuronTopic.model_validate_json(content)
+                    return parsed_data.model_dump()
+                    
+                except asyncio.TimeoutError:
+                    print(f"Neuron {neuron_id} - Attempt {attempt + 1} timed out. Retrying...")
+                    if attempt == MAX_RETRIES - 1:
+                        print(f"Neuron {neuron_id} - FAILED after {MAX_RETRIES} timeouts")
+                        return None
+                except Exception as e:
+                    print(f"Neuron {neuron_id} - Attempt {attempt + 1} failed: {e}")
+                    if attempt == MAX_RETRIES - 1:
+                        print(f"Neuron {neuron_id} - FAILED after {MAX_RETRIES} attempts")
+                        return None
+        except Exception as e:
+            print(f"Neuron {neuron_id} - Unexpected error: {e}")
+            return None
 async def main():
     import sys
     from tqdm.asyncio import tqdm_asyncio
@@ -99,13 +110,20 @@ async def main():
     tasks = [get_topics_from_vllm(row, semaphore) for idx, row in df.iterrows()]
     results = await tqdm_asyncio.gather(*tasks, desc="Processing neurons")
     
+    # Filter out failed requests (None values)
+    successful_results = [r for r in results if r is not None]
+    failed_count = len(results) - len(successful_results)
+    
     # Save results to JSON file
     output_file = csv_path.replace('.csv', '_results.json')
     with open(output_file, 'w') as f:
-        json.dump(results, f, indent=2)
+        json.dump(successful_results, f, indent=2)
     
     print(f"\n{'='*60}")
     print(f"COMPLETE! Results saved to {output_file}")
+    print(f"Successful: {len(successful_results)}/{len(results)}")
+    if failed_count > 0:
+        print(f"Failed: {failed_count}")
     print(f"{'='*60}")
 
 if __name__ == "__main__":
