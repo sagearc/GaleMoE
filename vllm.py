@@ -14,7 +14,7 @@ client = AsyncOpenAI(
 )
 MODEL_NAME = "Qwen/Qwen3-32B-AWQ" # Must match the --model flag used to start vLLM
 MAX_RETRIES = 5
-MAX_CONCURRENT_REQUESTS = 50  # Limit concurrent requests to avoid overwhelming the server
+MAX_CONCURRENT_REQUESTS = 100  # Limit concurrent requests to avoid overwhelming the server
 
 # --- DEFINE PYDANTIC SCHEMAS ---
 class TopicDetail(BaseModel):
@@ -72,7 +72,9 @@ Identify TWO distinct themes:
                             content = content[start:end]
                     
                     parsed_data = NeuronTopic.model_validate_json(content)
-                    return parsed_data.model_dump()
+                    result = parsed_data.model_dump()
+                    assert result['neuron_id'] == neuron_id, f"Neuron ID mismatch in response. Expected {neuron_id}, got {result['neuron_id']}"
+                    return result
                     
                 except asyncio.TimeoutError:
                     print(f"Neuron {neuron_id} - Attempt {attempt + 1} timed out. Retrying...")
@@ -89,6 +91,7 @@ Identify TWO distinct themes:
             return None
 async def main():
     import sys
+    import os
     from tqdm.asyncio import tqdm_asyncio
     
     # Default CSV path or accept from command line
@@ -97,33 +100,61 @@ async def main():
     else:
         csv_path = 'neuron_top20_titles_layer16_expert0_w3.csv'
     
+    # Create output directory for individual results
+    output_dir = csv_path.replace('.csv', '_results')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Check which neurons are already processed
+    processed_ids = set()
+    if os.path.exists(output_dir):
+        for filename in os.listdir(output_dir):
+            if filename.startswith('neuron_') and filename.endswith('.json'):
+                neuron_id = int(filename.replace('neuron_', '').replace('.json', ''))
+                processed_ids.add(neuron_id)
+    
+    if processed_ids:
+        print(f"Found {len(processed_ids)} already processed neurons. Resuming...")
+    
     # Read CSV file
-    df = pd.read_csv(csv_path).head(200)  # Remove .head() for full processing
+    df = pd.read_csv(csv_path)  # Remove .head() for full processing
+    
+    # Filter out already processed rows
+    df_to_process = df[~df['neuron_id'].isin(processed_ids)]
     
     print(f"Loaded {len(df)} neurons from {csv_path}")
+    print(f"Rows remaining to process: {len(df_to_process)}")
     print(f"Processing with max {MAX_CONCURRENT_REQUESTS} concurrent requests...\n")
+    
+    if len(df_to_process) == 0:
+        print("All neurons already processed!")
+        return
     
     # Create semaphore to limit concurrent requests
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     
+    async def process_and_save(row):
+        result = await get_topics_from_vllm(row, semaphore)
+        if result is not None:
+            # Save to individual file
+            neuron_file = os.path.join(output_dir, f"neuron_{result['neuron_id']}.json")
+            with open(neuron_file, 'w') as f:
+                json.dump(result, f, indent=2)
+        return result
+    
     # Process all rows with controlled concurrency
-    tasks = [get_topics_from_vllm(row, semaphore) for idx, row in df.iterrows()]
+    tasks = [process_and_save(row) for idx, row in df_to_process.iterrows()]
     results = await tqdm_asyncio.gather(*tasks, desc="Processing neurons")
     
-    # Filter out failed requests (None values)
-    successful_results = [r for r in results if r is not None]
-    failed_count = len(results) - len(successful_results)
-    
-    # Save results to JSON file
-    output_file = csv_path.replace('.csv', '_results.json')
-    with open(output_file, 'w') as f:
-        json.dump(successful_results, f, indent=2)
+    # Count failures
+    failed_count = sum(1 for r in results if r is None)
+    total_processed = len(processed_ids) + len(results) - failed_count
     
     print(f"\n{'='*60}")
-    print(f"COMPLETE! Results saved to {output_file}")
-    print(f"Successful: {len(successful_results)}/{len(results)}")
+    print(f"COMPLETE! Results saved to {output_dir}/")
+    print(f"Total processed: {total_processed}/{len(df)}")
+    print(f"This session: {len(results) - failed_count}/{len(results)}")
     if failed_count > 0:
-        print(f"Failed: {failed_count}")
+        print(f"Failed this session: {failed_count}")
     print(f"{'='*60}")
 
 if __name__ == "__main__":
