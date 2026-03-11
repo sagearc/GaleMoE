@@ -1,28 +1,18 @@
-import types
 from collections import defaultdict
-from pathlib import Path
 from functools import partial
+from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
 from safetensors.torch import save_file
-from transformers import BitsAndBytesConfig
-from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
-from transformers.models.mixtral.modeling_mixtral import (
-    MixtralBlockSparseTop2MLP,
-    MixtralAttention,
-    MixtralForCausalLM,
-    MixtralSparseMoeBlock,
-    MoeCausalLMOutputWithPast,
-)
+from transformer_lens import HookedTransformer
 from tqdm import tqdm
 
 from src.forward.patched_blocks import (
     CacheKey,
-    patched_block_sparse_top2_mlp_forward,
-    patched_sparse_moe_block_forward,
+    build_fwd_hooks,
+    make_gate_logits_hook,
 )
 
 NUM_EXPERTS = 8
@@ -60,18 +50,18 @@ def load_wiki_dataset(seed: int) -> Dataset:
     return ds
 
 
-def run_forward_pass(model: MixtralForCausalLM, tokenizer, batch_text) -> tuple[MoeCausalLMOutputWithPast, torch.Tensor]:
-    """Tokenize input, run forward pass, and track expert activations."""
-    # Tokenize the input
-    inputs = tokenizer(batch_text, return_tensors="pt", truncation=True, max_length=32, padding=True)
-    input_ids = inputs["input_ids"].to(model.device)
-    attention_mask = inputs["attention_mask"].to(model.device)
-    
-    # Forward pass (no gradients needed)
-    with torch.no_grad():
-        output: MoeCausalLMOutputWithPast = model(input_ids=input_ids, attention_mask=attention_mask, output_router_logits=True)    
+def run_forward_pass(model: HookedTransformer, batch_text, fwd_hooks, batch_info) -> torch.Tensor:
+    """Tokenize input, run forward pass with TransformerLens hooks."""
+    inputs = model.tokenizer(batch_text, return_tensors="pt", truncation=True, max_length=32, padding=True)
+    input_ids = inputs["input_ids"].to(model.cfg.device)
+    attention_mask = inputs["attention_mask"].to(model.cfg.device)
 
-    return output, input_ids
+    batch_info["seq_length"] = input_ids.shape[1]
+
+    with torch.no_grad():
+        model.run_with_hooks(input_ids, fwd_hooks=fwd_hooks, attention_mask=attention_mask)
+
+    return input_ids
 
 
 def save_cache_to_disk(output_dir: Path, cache: dict[CacheKey, torch.Tensor], batch_id: int):
@@ -88,7 +78,7 @@ def save_cache_to_disk(output_dir: Path, cache: dict[CacheKey, torch.Tensor], ba
         save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
 
 
-def save_router_logits_to_disk(router_logits: tuple[torch.FloatTensor], output_dir: Path, batch, batch_id: int, batch_size: int, seq_length: int):
+def save_router_logits_to_disk(router_logits: dict[int, torch.Tensor], output_dir: Path, batch, batch_id: int, batch_size: int, seq_length: int):
     """Save router logits for each layer to disk."""
     for layer_idx in LAYERS_TO_PATCH:
         file_path = output_dir / f"layer={layer_idx:02}/router/{batch_id:05}.safetensors"
@@ -101,18 +91,14 @@ def save_router_logits_to_disk(router_logits: tuple[torch.FloatTensor], output_d
         save_file(tensors, str(file_path), metadata={"batch_size": str(BATCH_SIZE), "wiki_seed": str(WIKI_SEED)})
 
 
-def patch_loop(model: MixtralForCausalLM, loop: tqdm):
-    """Patch the loop into each MixtralSparseMoeBlock for progress tracking."""
+def patch_loop(model: HookedTransformer, loop: tqdm):
+    """Register progress-tracking hooks on attention modules."""
     def hook(module, input, layer_idx):
-        loop.set_description(f"Forward pass [layer {1 + layer_idx:02}/32]")
+        loop.set_description(f"Forward pass [layer {1 + layer_idx:02}/{model.cfg.n_layers}]")
 
-    named_modules = dict(model.named_modules())
-    for layer_idx in range(model.config.num_hidden_layers):
-        layer_path = f"model.layers.{layer_idx}.self_attn"
-        module = named_modules[layer_path]
-        assert isinstance(module, MixtralAttention)
+    for layer_idx in range(model.cfg.n_layers):
         h = partial(hook, layer_idx=layer_idx)
-        module.register_forward_pre_hook(h)
+        model.blocks[layer_idx].attn.register_forward_pre_hook(h)
 
 
 def free_memory(activations_cache: dict[CacheKey, torch.Tensor]):
@@ -125,19 +111,15 @@ def free_memory(activations_cache: dict[CacheKey, torch.Tensor]):
 
 if __name__ == "__main__":
     output_dir = prepare_output_dir(OUTPUT_DIR)
-    
-    quantization_config = BitsAndBytesConfig(load_in_8bit=True)
-    model = MixtralForCausalLM.from_pretrained(
+
+    model = HookedTransformer.from_pretrained(
         "mistralai/Mixtral-8x7B-v0.1",
-        quantization_config=quantization_config,
-        device_map="auto")
+        dtype=torch.float16,
+        device="cuda",
+    )
+    model.tokenizer.pad_token = model.tokenizer.eos_token
 
-    model.eval()
-
-    tokenizer = LlamaTokenizerFast.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
-    tokenizer.pad_token = tokenizer.eos_token
-
-    print(f"Using device: {model.device}")
+    print(f"Using device: {model.cfg.device}")
     print(f"Number of experts: {NUM_EXPERTS}")
     print(f"Layers to patch: {LAYERS_TO_PATCH}")
     print(f"Batch size: {BATCH_SIZE}")
@@ -152,40 +134,37 @@ if __name__ == "__main__":
 
     cache: dict[CacheKey, torch.Tensor] = {}
     row_idx_to_prompt = [None for _ in range(BATCH_SIZE)]
-    named_modules = dict(model.named_modules())
+    routing_state = {}
+    batch_info = {"seq_length": None}
+    router_logits_store = {}
 
-    print("Patching MixtralSparseMoeBlock and MixtralBlockSparseTop2MLP forward methods...")
+    fwd_hooks = build_fwd_hooks(
+        layers_to_patch=LAYERS_TO_PATCH,
+        num_experts=NUM_EXPERTS,
+        cache=cache,
+        routing_state=routing_state,
+        batch_info=batch_info,
+        row_idx_to_prompt=row_idx_to_prompt,
+    )
+
     for layer_idx in LAYERS_TO_PATCH:
-        layer_path = f"model.layers.{layer_idx}.block_sparse_moe"
-        module = named_modules[layer_path]
-        assert isinstance(module, MixtralSparseMoeBlock)
-        module.forward = types.MethodType(patched_sparse_moe_block_forward, module)
-        module.patch_layer_idx = layer_idx
+        model.blocks[layer_idx].mlp.W_gate.register_forward_hook(
+            make_gate_logits_hook(layer_idx, router_logits_store)
+        )
 
-        for expert in range(NUM_EXPERTS):
-            layer_path = f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert}"
-            module = named_modules[layer_path]
-            assert isinstance(module, MixtralBlockSparseTop2MLP)
-            module.forward = types.MethodType(patched_block_sparse_top2_mlp_forward, module)
-            module.patch_expert_id = expert
-            module.patch_layer_idx = layer_idx
-            module.patch_cache = cache
-            module.patch_row_idx_to_prompt = row_idx_to_prompt
-
-    for batch_id, batch in  enumerate(loop):
+    for batch_id, batch in enumerate(loop):
         if batch_id >= N_BATCHES:
             break
 
         for i, (row_id, prompt) in enumerate(zip(batch["id"], batch["title"])):
             row_idx_to_prompt[i] = (row_id, prompt)
 
-        output, input_ids = run_forward_pass(model, tokenizer, batch["title"])
+        input_ids = run_forward_pass(model, batch["title"], fwd_hooks, batch_info)
         batch_size, seq_length = input_ids.shape
 
-        loop.set_description(f"Saving batch to disk")
-        # group by layer, expert, w_id and save to disk
+        loop.set_description("Saving batch to disk")
         save_cache_to_disk(output_dir, cache, batch_id)
-        save_router_logits_to_disk(router_logits=output.router_logits,
+        save_router_logits_to_disk(router_logits=router_logits_store,
                                    output_dir=output_dir,
                                    batch=batch,
                                    batch_id=batch_id,
@@ -194,8 +173,11 @@ if __name__ == "__main__":
 
         print(f"Saved total of {len(cache)} tensors in batch {batch_id}\n")
 
-        del output
         del input_ids
         free_memory(cache)
+        routing_state.clear()
+        for v in router_logits_store.values():
+            del v
+        router_logits_store.clear()
 
         loop.set_description("Forward pass")
