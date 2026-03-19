@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Project-specific cache and results
+svd_cache/
+results/
+.vscode/
+illm*
+.vscode/launch.json
+.vscode/launch.json

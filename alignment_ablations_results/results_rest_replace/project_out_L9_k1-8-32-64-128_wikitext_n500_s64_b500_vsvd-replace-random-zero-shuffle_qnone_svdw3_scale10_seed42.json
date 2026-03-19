@@ -1,0 +1,116 @@
+{
+  "config": {
+    "svd_dir": "/worxpace/repos/py/GaleMoE/svd_cache/float/w3/",
+    "layer_idx": 9,
+    "output_dir": "results_rest_replace/",
+    "num_experts": 8,
+    "model_id": "mistralai/Mixtral-8x7B-v0.1",
+    "model_tag": "mistralai_Mixtral_8x7B_v0.1",
+    "num_samples": 500,
+    "seq_len": 64,
+    "batch_size": 500,
+    "seed": 42,
+    "variations": [
+      "svd",
+      "replace",
+      "random",
+      "zero",
+      "shuffle"
+    ],
+    "dataset": "wikitext",
+    "text_file": null,
+    "top_k": [
+      1,
+      8,
+      32,
+      64,
+      128
+    ],
+    "quantization": null,
+    "scale": 10.0,
+    "replace_weight_decay": 1.0
+  },
+  "by_k": {
+    "1": {
+      "svd": {
+        "loss": 2.98097562789917,
+        "delta": 0.008820056915283203
+      },
+      "replace": {
+        "loss": 2.9740350246429443,
+        "delta": 0.0018794536590576172
+      },
+      "random": {
+        "loss": 2.9723610877990723,
+        "delta": 0.00020551681518554688
+      }
+    },
+    "8": {
+      "svd": {
+        "loss": 2.982394218444824,
+        "delta": 0.0102386474609375
+      },
+      "replace": {
+        "loss": 2.9757182598114014,
+        "delta": 0.0035626888275146484
+      },
+      "random": {
+        "loss": 2.9728078842163086,
+        "delta": 0.000652313232421875
+      }
+    },
+    "32": {
+      "svd": {
+        "loss": 2.9829344749450684,
+        "delta": 0.01077890396118164
+      },
+      "replace": {
+        "loss": 2.976580858230591,
+        "delta": 0.0044252872467041016
+      },
+      "random": {
+        "loss": 2.973027229309082,
+        "delta": 0.0008716583251953125
+      }
+    },
+    "64": {
+      "svd": {
+        "loss": 2.982713460922241,
+        "delta": 0.010557889938354492
+      },
+      "replace": {
+        "loss": 2.976273775100708,
+        "delta": 0.004118204116821289
+      },
+      "random": {
+        "loss": 2.9734065532684326,
+        "delta": 0.0012509822845458984
+      }
+    },
+    "128": {
+      "svd": {
+        "loss": 2.985398054122925,
+        "delta": 0.013242483139038086
+      },
+      "replace": {
+        "loss": 2.97642183303833,
+        "delta": 0.004266262054443359
+      },
+      "random": {
+        "loss": 2.9757421016693115,
+        "delta": 0.0035865306854248047
+      }
+    }
+  },
+  "k_independent": {
+    "zero": {
+      "loss": 2.976902484893799,
+      "delta": 0.004746913909912109
+    },
+    "shuffle": {
+      "loss": 2.976421356201172,
+      "delta": 0.004265785217285156
+    }
+  },
+  "baseline_loss": 2.9721555709838867
+}
