@@ -1,4 +1,5 @@
 """Visualization for router intervention results."""
+
 from .plotter import (
     load_results,
     load_results_dir,

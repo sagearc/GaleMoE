@@ -4,17 +4,17 @@ Usage::
 
     # Delta vs k + migration heatmaps for one k/variant, save to dir
     python -m src.experiments.router_interventions.plot_vector_intervention_results \\
-        results_hijack_try/hijack_L5_Src5_k1-4-8-256_S3.0_wikitext_qnone.json \\
-        --save-dir results_hijack_try/plots
+        alignment_ablations_results/results_hijack_try_1/hijack_L5_Src5_k1-4-8-256_S3.0_wikitext_qnone.json \\
+        --save-dir alignment_ablations_results/results_hijack_try_1/plots
 
     # Only delta vs k, show interactively
     python -m src.experiments.router_interventions.plot_vector_intervention_results \\
-        results_hijack_try/hijack_L5_Src5_k1-4-8-256_S3.0_wikitext_qnone.json
+        alignment_ablations_results/results_hijack_try_1/hijack_L5_Src5_k1-4-8-256_S3.0_wikitext_qnone.json
 
     # Migration heatmap for k=8, variant svd_sum_normalized_hijack
     python -m src.experiments.router_interventions.plot_vector_intervention_results \\
-        results_hijack_try/hijack_L5_Src5_k1-4-8-256_S3.0_wikitext_qnone.json \\
-        --migration --k 8 --variant svd_sum_normalized_hijack --save-dir results_hijack_try/plots
+        alignment_ablations_results/results_hijack_try_1/hijack_L5_Src5_k1-4-8-256_S3.0_wikitext_qnone.json \\
+        --migration --k 8 --variant svd_sum_normalized_hijack --save-dir alignment_ablations_results/results_hijack_try_1/plots
 """
 
 from __future__ import annotations
